@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+build/
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Node / UI
+ui/node_modules/
+ui/dist/
+
+# Test artifacts
+.coverage
+htmlcov/
+cassettes/*.local.yaml
+
+# Local database
+*.db
+wanderbot.db
