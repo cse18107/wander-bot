@@ -1,0 +1,13 @@
+# Staging overrides.
+api:
+  replicas: 1
+  autoscaling:
+    enabled: false
+mcp:
+  replicas: 1
+env:
+  WB_ENV: staging
+  WB_AMADEUS_ENV: test
+  WB_GUARDRAILS_BACKEND: auto
+ingress:
+  host: staging.wanderbot.example.com

@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - name: Set up Python
+        run: uv python install 3.12
+      - name: Install
+        run: uv pip install --system ".[dev]"
+      - name: Ruff
+        run: ruff check src tests
+      - name: Ruff format check
+        run: ruff format --check src tests
+      - name: Mypy
+        run: mypy src
+      - name: Unit + integration tests
+        run: pytest -m "not live" --maxfail=1 -q
+
+  # Live sandbox contract tests run nightly, not on every PR (need vendor creds).
+  live-contract:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv pip install --system ".[dev]"
+      - run: pytest -m live -q
+        env:
+          WB_AMADEUS_CLIENT_ID: ${{ secrets.WB_AMADEUS_CLIENT_ID }}
+          WB_AMADEUS_CLIENT_SECRET: ${{ secrets.WB_AMADEUS_CLIENT_SECRET }}

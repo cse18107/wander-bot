@@ -1,0 +1,59 @@
+# Default values. Override per environment (values-staging.yaml / values-prod.yaml).
+
+image:
+  registry: ghcr.io/triveous
+  apiRepository: wanderbot-api
+  mcpRepository: wanderbot-mcp
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+api:
+  replicas: 2
+  port: 8000
+  resources:
+    requests: { cpu: "250m", memory: "512Mi" }
+    limits: { cpu: "1", memory: "1Gi" }
+  autoscaling:
+    enabled: true
+    minReplicas: 2
+    maxReplicas: 10
+    targetCPUUtilizationPercentage: 70
+
+mcp:
+  replicas: 2
+  port: 8090
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits: { cpu: "500m", memory: "512Mi" }
+
+# KEDA event-driven autoscaling for any worker tier (queue-depth based).
+keda:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 20
+  redisAddress: "redis:6379"
+  listName: "wanderbot:jobs"
+  listLength: "20"
+
+env:
+  WB_ENV: production
+  WB_GUARDRAILS_BACKEND: bedrock
+  WB_AMADEUS_ENV: production
+  WB_AWS_REGION: us-east-1
+
+# Secrets are pulled from a secrets manager via External Secrets Operator.
+externalSecrets:
+  enabled: true
+  secretStoreRef: aws-secrets-manager
+  remoteKeyPrefix: wanderbot/prod
+
+ingress:
+  enabled: true
+  host: wanderbot.example.com
+  tlsSecret: wanderbot-tls
+
+postgres:
+  # In prod, point at a managed instance; this is the connection secret key.
+  urlSecretKey: WB_DATABASE_URL
+redis:
+  urlSecretKey: WB_REDIS_URL

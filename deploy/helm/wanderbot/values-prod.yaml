@@ -1,0 +1,17 @@
+# Production overrides.
+api:
+  replicas: 3
+  autoscaling:
+    enabled: true
+    minReplicas: 3
+    maxReplicas: 20
+mcp:
+  replicas: 3
+keda:
+  enabled: true
+env:
+  WB_ENV: production
+  WB_AMADEUS_ENV: production
+  WB_GUARDRAILS_BACKEND: bedrock
+ingress:
+  host: wanderbot.example.com
