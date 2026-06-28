@@ -186,7 +186,9 @@ async def _stream_run(graph, inputs, config) -> AsyncIterator[dict]:
                         "date": brief.start_date.isoformat() if brief and brief.start_date else None,
                         "destination": brief.destination_city if brief else None,
                         "nearby": [_offer_to_dict(o, with_date=True) for o in nearby],
-                        "transport": [t.model_dump() for t in transport],
+                        "transport": [
+                            t.model_dump() if hasattr(t, "model_dump") else t for t in transport
+                        ],
                     }
                 ),
             }
@@ -200,10 +202,7 @@ async def _stream_run(graph, inputs, config) -> AsyncIterator[dict]:
             question = f"Where will you be flying from for your trip to {dest}? (your city or nearest airport)"
         else:
             field = "start_date"
-            dur = brief.duration_days if brief else None
             question = f"When would you like to start your trip to {dest}?"
-            if dur:
-                question += f" (You said {dur} days — I'll calculate the end date.)"
         yield {
             "event": "clarification_required",
             "data": json.dumps({"field": field, "question": question}),

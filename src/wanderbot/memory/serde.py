@@ -23,6 +23,8 @@ _ALLOWED = [
     ("wanderbot.agents.state", "BudgetState"),
     ("wanderbot.agents.state", "Itinerary"),
     ("wanderbot.agents.state", "ItineraryDay"),
+    ("wanderbot.agents.state", "TransportRoute"),
+    ("wanderbot.agents.state", "TransportLeg"),
 ]
 
 
