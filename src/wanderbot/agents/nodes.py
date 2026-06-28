@@ -46,6 +46,18 @@ def _pick_web(hotels: list) -> object | None:
     )
 
 
+def _same_city(
+    origin_name: str | None, dest_name: str | None,
+    origin_code: str | None, dest_code: str | None,
+) -> bool:
+    """True when origin and destination are the same place (a local trip)."""
+    if origin_code and dest_code and origin_code == dest_code:
+        return True
+    o = (origin_name or "").strip().lower()
+    d = (dest_name or "").strip().lower()
+    return bool(o and d and o == d)
+
+
 def _last_human(state: TripState) -> str:
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
@@ -235,6 +247,30 @@ class Nodes:
         destination = await self._resolve_code(
             brief.destination_city, geo.iata_city_code if geo else None
         )
+
+        # Local trip: origin and destination are the same city (e.g. planning a
+        # day out in your own city). There are no flights — and no "how to reach"
+        # arrival problem — so skip the whole flight/transport step and go straight
+        # to the itinerary. Getting around to each spot is covered per-day in the
+        # day-detail drawer.
+        if _same_city(brief.origin_city, brief.destination_city, origin, destination):
+            log.info("local_trip_skip_transit", city=brief.destination_city)
+            done = self._mark(state, "flights")
+            return {
+                "flight_options": [],
+                "nearby_options": [],
+                "transport_options": [],
+                "flights_searched": True,
+                "local_trip": True,
+                "done": done,
+                "messages": [
+                    AIMessage(
+                        content=f"{brief.destination_city} is your home city — no flights "
+                        "or intercity transport needed, so I'll jump straight to your day plan."
+                    )
+                ],
+            }
+
         options: list = []
         nearby: list = []
         if origin and destination and brief.start_date:
@@ -323,6 +359,10 @@ class Nodes:
     async def lodging(self, state: TripState) -> TripState:
         brief = state["brief"]
         assert brief is not None
+        # Local trip (home city == destination): the traveller already lives here,
+        # so there's no stay to book. Skip lodging.
+        if state.get("local_trip"):
+            return {"done": self._mark(state, "lodging")}
         geo = state.get("geo")
         city_code = (geo.iata_city_code if geo else None) or _to_code(brief.destination_city)
         selections = state["selections"]

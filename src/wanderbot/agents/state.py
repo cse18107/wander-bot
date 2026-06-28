@@ -111,6 +111,7 @@ class TripState(TypedDict, total=False):
     flight_options: list[FlightOffer]
     nearby_options: list[FlightOffer]
     transport_options: list[TransportRoute]
+    local_trip: bool
     flights_searched: bool
     flight_action: str | None
     selections: Selections
@@ -139,6 +140,7 @@ def initial_state(
         flight_options=[],
         nearby_options=[],
         transport_options=[],
+        local_trip=False,
         flights_searched=False,
         flight_action=None,
         selections=Selections(),
