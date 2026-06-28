@@ -78,6 +78,8 @@ export default function App() {
   const [dayOpen, setDayOpen] = useState(false);
   const [dayLoading, setDayLoading] = useState(false);
   const [convo, setConvo] = useState<{ role: string; text: string; cards?: ChatCard[] }[]>([]);
+  const [mobileTab, setMobileTab] = useState<"chat" | "plan" | "info">("plan");
+  const [menuOpen, setMenuOpen] = useState(false);
   const [chatImg, setChatImg] = useState<string | null>(null);
   const [askBusy, setAskBusy] = useState(false);
   const [progressOpen, setProgressOpen] = useState(false);
@@ -261,6 +263,12 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [lightbox, images.length]);
 
+  // On small screens, surface the Plan pane whenever it needs attention
+  // (generation in progress, or a clarify / flight / no-flights prompt).
+  useEffect(() => {
+    if (busy || clarify || flightOptions || noFlights) setMobileTab("plan");
+  }, [busy, clarify, flightOptions, noFlights]);
+
   if (!token) return <Auth onAuthed={(t, e) => { setToken(t); setEmail(e); }} />;
 
   const visibleSteps = steps.filter((s) => s !== "supervisor" && s !== "__interrupt__");
@@ -275,7 +283,7 @@ export default function App() {
       <div className="rail-title">My Trips</div>
       {plans.length === 0 && <div className="muted small">No saved trips yet.</div>}
       {plans.map((p) => (
-        <button key={p.id} className={`trip ${p.id === planId ? "on" : ""}`} onClick={() => openSavedPlan(p)}>
+        <button key={p.id} className={`trip ${p.id === planId ? "on" : ""}`} onClick={() => { setMenuOpen(false); openSavedPlan(p); }}>
           <div className="trip-thumb" style={p.hero ? { backgroundImage: `url(${p.hero})` } : undefined}><Icon name="luggage" /></div>
           <div className="trip-meta"><b>{p.title || "Trip"}</b><span>{p.destination || ""}</span></div>
         </button>
@@ -286,10 +294,16 @@ export default function App() {
   // ---------- HOME ----------
   if (screen === "home") {
     return (
-      <div className="layout home">
+      <div className={`layout home${menuOpen ? " menu-open" : ""}`}>
+        <header className="home-topbar">
+          <button className="menu-btn" aria-label="Menu" onClick={() => setMenuOpen(true)}><Icon name="menu" /></button>
+          <div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Voyager AI</span></div>
+          <ThemeToggle />
+        </header>
+        {menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} />}
         <aside className="rail">
-          <div className="rail-top"><div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Voyager AI</span></div><ThemeToggle /></div>
-          <button className="newplan" onClick={() => { setPlanId(""); resetPlan(); setScreen("plan"); }}><Icon name="add" /> New Plan</button>
+          <div className="rail-top"><div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Voyager AI</span></div><div className="rail-top-actions"><ThemeToggle /><button className="menu-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><Icon name="close" /></button></div></div>
+          <button className="newplan" onClick={() => { setMenuOpen(false); setPlanId(""); resetPlan(); setScreen("plan"); }}><Icon name="add" /> New Plan</button>
           <div className="rail-spacer-sm" /><TripList />
           <div className="rail-spacer" />
           <div className="rail-bottom">
@@ -317,7 +331,7 @@ export default function App() {
 
   // ---------- PLAN ----------
   return (
-    <div className="layout">
+    <div className={`layout m-${mobileTab}`}>
       <aside className="rail chatrail">
         <div className="rail-top"><button className="back" onClick={() => { setScreen("home"); fetchPlans(); }}><Icon name="arrow_back" /> Trips</button><ThemeToggle /></div>
         <div className="chat-head">
@@ -598,6 +612,18 @@ export default function App() {
       {approval && (
         <div className="modal-bg"><div className="modal"><h3>Approve this plan</h3><p>Total <b>{approval.total.toFixed(0)}</b> · flight {approval.flight ?? "—"} · hotel {approval.hotel ?? "—"}</p><p className="muted">This records your approval only — <b>no real booking, payment, or ticketing</b> is performed in this demo.</p><div className="modal-actions"><button className="ghost" onClick={() => decide("declined")}>Decline</button><button onClick={() => decide("approved")}>Approve plan</button></div></div></div>
       )}
+
+      <nav className="mobile-nav" aria-label="Sections">
+        <button className={mobileTab === "chat" ? "on" : ""} onClick={() => setMobileTab("chat")}>
+          <Icon name="forum" /><span>Assistant</span>
+        </button>
+        <button className={mobileTab === "plan" ? "on" : ""} onClick={() => setMobileTab("plan")}>
+          <Icon name="map" /><span>Plan</span>
+        </button>
+        <button className={mobileTab === "info" ? "on" : ""} onClick={() => setMobileTab("info")}>
+          <Icon name="photo_library" /><span>Details</span>
+        </button>
+      </nav>
     </div>
   );
 }
