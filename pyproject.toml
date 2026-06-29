@@ -68,7 +68,15 @@ src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC", "S", "C4", "SIM", "RUF"]
-ignore = ["S101"]  # allow asserts in tests
+ignore = [
+    "S101",   # allow asserts in tests
+    "B008",   # Depends() in arg defaults is the standard FastAPI pattern
+    "S110",   # intentional try/except/pass (guarded best-effort paths)
+    "S112",   # intentional try/except/continue
+    "RUF001", # ambiguous unicode (en-dashes) used deliberately in prompt strings
+    "RUF002",
+    "RUF003",
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["S105", "S106"]
