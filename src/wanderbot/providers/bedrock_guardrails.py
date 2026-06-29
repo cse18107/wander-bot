@@ -54,14 +54,20 @@ class BedrockGuardrailsClient:
         if not gid:
             raise RuntimeError("bedrock_guardrail_id not configured")
 
+        # Bedrock only accepts the grounding_source/query/guard_content qualifiers
+        # when a contextual-grounding check is being performed (both a grounding
+        # source AND a query must be supplied). For a plain input/output
+        # moderation call, qualifiers are invalid and trigger
+        # "input is in incorrect format" — so send the minimal content shape.
         content: list[dict[str, Any]] = []
-        if grounding_source is not None:
+        if grounding_source is not None and query is not None:
             content.append(
                 {"text": {"text": grounding_source, "qualifiers": ["grounding_source"]}}
             )
-        if query is not None:
             content.append({"text": {"text": query, "qualifiers": ["query"]}})
-        content.append({"text": {"text": text, "qualifiers": ["guard_content"]}})
+            content.append({"text": {"text": text, "qualifiers": ["guard_content"]}})
+        else:
+            content.append({"text": {"text": text}})
 
         def _call() -> dict[str, Any]:
             return self._boto().apply_guardrail(
