@@ -1,6 +1,6 @@
 // API client. The JWT is stored in localStorage and attached to every request.
 
-import type { ChatCard } from "./types";
+import type { ChatCard, PlaceDetail } from "./types";
 
 export type SSEHandler = (event: string, data: string) => void;
 
@@ -98,6 +98,9 @@ export async function getThread(id: string): Promise<{ id: string; title: string
 }
 export async function postMessage(threadId: string, question: string): Promise<{ answer: string; plan?: any; title?: string | null; cards?: ChatCard[] | null }> {
   return postJSON(`/api/chat/threads/${threadId}/message`, { question });
+}
+export async function placeDetail(thread_id: string, name: string, city?: string | null): Promise<PlaceDetail> {
+  return postJSON("/api/plan/place_detail", { thread_id, name, city });
 }
 export async function deleteThread(id: string): Promise<void> {
   await fetch(`/api/chat/threads/${id}`, { method: "DELETE", headers: authHeaders() });

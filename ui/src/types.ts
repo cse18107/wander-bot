@@ -54,6 +54,11 @@ export interface FlightSegment {
   destination: string;
   departure_at?: string;
   arrival_at?: string;
+  origin_name?: string | null;
+  origin_city?: string | null;
+  destination_name?: string | null;
+  destination_city?: string | null;
+  carrier_name?: string | null;
 }
 
 export interface Flight {
@@ -84,6 +89,13 @@ export interface Selections {
   activities: Activity[];
 }
 
+export interface BudgetTier {
+  name: string;
+  total: number;
+  home_total?: number | null;
+  note?: string | null;
+}
+
 export interface Budget {
   target: number | null;
   currency: string;
@@ -91,6 +103,11 @@ export interface Budget {
   total: number;
   local_total?: number | null;
   local_currency?: string | null;
+  home_total?: number | null;
+  home_currency?: string | null;
+  estimated?: boolean;
+  tiers?: BudgetTier[];
+  selected_tier?: string | null;
 }
 
 export interface ItineraryDay {
@@ -114,11 +131,17 @@ export interface Itinerary {
 export interface FlightOption {
   id: string;
   price: Money;
+  currency_name?: string | null;
   origin: string;
   destination: string;
+  origin_name?: string | null;
+  origin_city?: string | null;
+  destination_name?: string | null;
+  destination_city?: string | null;
   depart: string;
   arrive: string;
   carrier: string;
+  carrier_name?: string | null;
   number: string;
   stops: number;
   date?: string | null;
@@ -137,6 +160,7 @@ export interface Walkable {
 export interface DayDetail {
   day: number;
   title: string;
+  city?: string | null;
   places: DayPlace[];
   weather?: string | null;
   weather_detail?: {
@@ -146,10 +170,21 @@ export interface DayDetail {
     precip_mm?: number;
     wind_kmh?: number;
   } | null;
-  street_food: string[];
-  restaurants: string[];
+  street_food: (string | { name: string; veg?: boolean })[];
+  restaurants: (string | { name: string; diet?: string; link?: string })[];
   walkable: Walkable[];
   images: string[];
+}
+
+export interface PlaceDetail {
+  name: string;
+  city?: string | null;
+  description?: string;
+  kind?: string | null;
+  how_to_reach?: string | null;
+  best_time?: string | null;
+  highlights?: string[];
+  images?: string[];
 }
 
 export interface ApprovalPayload {
