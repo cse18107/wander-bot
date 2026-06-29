@@ -21,10 +21,15 @@ _ALLOWED = [
     ("wanderbot.domain", "GeoPoint"),
     ("wanderbot.agents.state", "Selections"),
     ("wanderbot.agents.state", "BudgetState"),
+    ("wanderbot.agents.state", "BudgetTier"),
     ("wanderbot.agents.state", "Itinerary"),
     ("wanderbot.agents.state", "ItineraryDay"),
     ("wanderbot.agents.state", "TransportRoute"),
     ("wanderbot.agents.state", "TransportLeg"),
+    ("wanderbot.agents.state", "TripLeg"),
+    ("wanderbot.agents.state", "HopOption"),
+    ("wanderbot.agents.state", "LegPlan"),
+    ("wanderbot.agents.schemas", "TripStop"),
 ]
 
 

@@ -11,11 +11,24 @@ from datetime import date
 from pydantic import BaseModel, Field, field_validator
 
 
+class TripStop(BaseModel):
+    """One destination in a (possibly multi-stop) trip."""
+
+    destination_city: str
+    days: int | None = Field(None, description="Nights/days at this stop if stated")
+    start_date: date | None = Field(None, description="Arrival date at this stop if stated")
+
+
 class TripBrief(BaseModel):
     """Normalized intent extracted from the user's request."""
 
     origin_city: str | None = Field(None, description="Departure city or IATA code")
     destination_city: str | None = Field(None, description="Destination city or IATA code")
+    stops: list[TripStop] = Field(
+        default_factory=list,
+        description="Ordered destinations for a multi-stop trip, e.g. [Tokyo 3d, Shanghai 4d]. "
+        "Leave empty for a single-destination trip.",
+    )
     start_date: date | None = None
     end_date: date | None = None
     duration_days: int | None = Field(None, description="Trip length in days if stated, e.g. '4 days'")

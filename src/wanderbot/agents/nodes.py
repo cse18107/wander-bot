@@ -14,13 +14,17 @@ from langchain_core.messages import AIMessage, HumanMessage
 from pydantic import BaseModel, Field
 
 from wanderbot.agents.bundle import Deps
-from wanderbot.agents.schemas import TripBrief
+from wanderbot.agents.schemas import TripBrief, TripStop
 from wanderbot.agents.state import (
     BudgetState,
+    BudgetTier,
+    HopOption,
     Itinerary,
     ItineraryDay,
+    LegPlan,
     Selections,
     TransportRoute,
+    TripLeg,
     TripState,
 )
 from wanderbot.domain import (
@@ -58,6 +62,39 @@ def _same_city(
     return bool(o and d and o == d)
 
 
+_CURRENCY_NAMES = {
+    "USD": "US Dollar", "EUR": "Euro", "GBP": "British Pound", "INR": "Indian Rupee",
+    "JPY": "Japanese Yen", "CNY": "Chinese Yuan", "AUD": "Australian Dollar",
+    "CAD": "Canadian Dollar", "SGD": "Singapore Dollar", "AED": "UAE Dirham",
+    "THB": "Thai Baht", "CHF": "Swiss Franc", "HKD": "Hong Kong Dollar",
+    "NZD": "New Zealand Dollar", "MYR": "Malaysian Ringgit", "KRW": "South Korean Won",
+    "NPR": "Nepalese Rupee",
+}
+
+
+def _currency_name(code: str | None) -> str | None:
+    return _CURRENCY_NAMES.get(code.upper(), code.upper()) if code else None
+
+
+def _build_legs(brief: TripBrief) -> list[TripLeg]:
+    """The static structure of the trip: ordered cities + nights each.
+
+    Dates and origins are chained during the leg loop from the (clarified) start
+    date of the first leg, so they stay correct even if the date is asked later.
+    """
+    stops = list(brief.stops or [])
+    if not stops and brief.destination_city:
+        stops = [TripStop(destination_city=brief.destination_city, days=brief.duration_days)]
+    multi = len(stops) > 1
+    return [
+        TripLeg(
+            destination_city=s.destination_city,
+            days=s.days or (brief.duration_days if not multi else 3) or 3,
+        )
+        for s in stops
+    ]
+
+
 def _last_human(state: TripState) -> str:
     for msg in reversed(state.get("messages", [])):
         if isinstance(msg, HumanMessage):
@@ -67,6 +104,14 @@ def _last_human(state: TripState) -> str:
 
 class _TransportResearch(BaseModel):
     routes: list[TransportRoute] = Field(default_factory=list)
+
+
+class _BudgetTiers(BaseModel):
+    tiers: list[BudgetTier] = Field(default_factory=list)
+
+
+class _ImagePick(BaseModel):
+    keep: list[int] = Field(default_factory=list, description="indices of relevant images")
 
 
 class Nodes:
@@ -85,7 +130,12 @@ class Nodes:
             "set start_date if the user gives an actual start date or month; if no "
             "start date is mentioned, leave start_date null (we will ask). Resolve a "
             "stated month to the 1st of its next occurrence. Keep city names as "
-            "written (do not convert to codes).\n\nMessage:\n" + text
+            "written (do not convert to codes).\n"
+            "MULTI-STOP: if the user names MORE THAN ONE destination (e.g. '3 days in "
+            "Tokyo then 4 days in Shanghai'), fill 'stops' as an ORDERED list, each with "
+            "destination_city, days, and start_date if stated. Put the first stop's city "
+            "in destination_city too. For a single destination, leave 'stops' empty.\n\n"
+            "Message:\n" + text
         )
         try:
             brief: TripBrief = await structured.ainvoke(prompt)  # type: ignore[assignment]
@@ -101,6 +151,15 @@ class Nodes:
         # Default the departure city to the user's saved home city if not stated.
         if not brief.origin_city and state.get("home_city"):
             brief.origin_city = state["home_city"]
+
+        # Resolve the trip into ordered legs and point the brief at the FIRST leg
+        # (the single-destination nodes plan one leg at a time; finalize_leg chains
+        # the rest).
+        legs = _build_legs(brief)
+        if legs:
+            first = legs[0]
+            brief.destination_city = first.destination_city
+            brief.duration_days = first.days
 
         # If a start date IS known but no end, derive it from the duration.
         if brief.start_date and not brief.end_date:
@@ -127,7 +186,49 @@ class Nodes:
             searchable=brief.is_searchable(),
             recalled=len(memories),
         )
-        return {"brief": brief, "budget": budget, "selections": Selections(), "memories": memories}
+        return {
+            "brief": brief,
+            "budget": budget,
+            "selections": Selections(),
+            "memories": memories,
+            "legs": legs,
+            "leg_index": 0,
+            "leg_plans": [],
+            "legs_complete": False,
+        }
+
+    async def _validate_images(self, pairs: list[tuple[str, str]], place: str) -> list[str]:
+        """Image-validation agent: keep only photos that genuinely depict ``place``.
+
+        Tavily image results carry descriptions; an LLM judges each against the
+        destination so a Taj Mahal (Agra) shot never lands on an Ahmedabad plan.
+        Images with no description can't be judged, so they're kept (low risk).
+        """
+        if not pairs:
+            return []
+        described = [(i, d) for i, (_u, d) in enumerate(pairs) if d.strip()]
+        undescribed = [u for u, d in pairs if not d.strip()]
+        if not described:
+            return [u for u, _d in pairs]
+        listing = "\n".join(f"{i}: {d}" for i, d in described)
+        prompt = (
+            f"We need photos that genuinely depict {place} (its skyline, streets, landmarks, "
+            f"food or culture). Below are candidate image descriptions by index. Return 'keep' "
+            f"= the indices that match {place}. EXCLUDE any image that clearly shows a DIFFERENT "
+            f"city or a famous landmark NOT located in {place} (e.g. the Taj Mahal is in Agra — "
+            f"exclude it unless {place} is Agra). If unsure, exclude.\n\n{listing}"
+        )
+        try:
+            res: _ImagePick = await self.deps.model.with_structured_output(_ImagePick).ainvoke(
+                prompt
+            )  # type: ignore[assignment]
+            keep = [pairs[i][0] for i in res.keep if 0 <= i < len(pairs)]
+            result = keep + undescribed
+            log.info("images_validated", place=place, kept=len(keep), total=len(pairs))
+            return result or [u for u, _d in pairs]
+        except Exception as exc:  # pragma: no cover - resilience
+            log.warning("image_validation_failed", error=str(exc))
+            return [u for u, _d in pairs]
 
     # --- research -------------------------------------------------------
     async def research(self, state: TripState) -> TripState:
@@ -158,10 +259,18 @@ class Nodes:
 
         # Imagery for the UI (one Tavily call, distributed across hero + day cards).
         images: list[str] = []
-        if self.deps.researcher is not None and brief.destination_city:
-            images = await self.deps.researcher.fetch_images(
-                f"{brief.destination_city} travel landmarks cityscape", n=8
-            )
+        researcher = self.deps.researcher
+        if researcher is not None and brief.destination_city:
+            if hasattr(researcher, "fetch_images_described"):
+                described = await researcher.fetch_images_described(
+                    f"{brief.destination_city} city landmarks streets travel", n=10
+                )
+                # Validate relevance so a wrong-city landmark can't slip into the gallery.
+                images = (await self._validate_images(described, brief.destination_city))[:8]
+            else:  # pragma: no cover - older/fake researcher
+                images = await researcher.fetch_images(
+                    f"{brief.destination_city} travel landmarks cityscape", n=8
+                )
         return {"geo": geo, "research": note, "images": images}
 
     def _mark(self, state: TripState, step: str) -> dict[str, bool]:
@@ -220,6 +329,10 @@ class Nodes:
             "there. IMPORTANT: include BREAK JOURNEYS — e.g. a train or flight to the nearest "
             "railhead/airport in a neighbouring town, then a taxi / shared jeep / bus for the "
             "final stretch. Give 2-4 distinct routes (cover the cheapest and the fastest).\n"
+            f"CRITICAL: EVERY route MUST finish AT {dest}. If a train or flight only reaches a "
+            f"nearby hub (e.g. the nearest airport/railhead), you MUST add the FINAL leg (taxi, "
+            f"bus or shared jeep) from that hub to {dest}. Never return a route that stops short "
+            f"of {dest} — the last leg's to_place has to be {dest} (or a point within it).\n"
             "For EACH route return ordered legs. Each leg has: mode (Train/Flight/Bus/Shared "
             "jeep/Taxi/Ferry/Walk), icon (a Google Material Symbols name like 'train', 'flight', "
             "'directions_bus', 'local_taxi', 'directions_car', 'directions_boat', 'directions_walk'), "
@@ -233,9 +346,79 @@ class Nodes:
             res: _TransportResearch = await self.deps.model.with_structured_output(
                 _TransportResearch
             ).ainvoke(prompt)  # type: ignore[assignment]
-            return [r for r in (res.routes or []) if r.title and r.legs][:4]
+            routes = [r for r in (res.routes or []) if r.title and r.legs][:4]
+            return self._review_transport(routes, dest)
         except Exception as exc:  # pragma: no cover - resilience
             log.warning("transport_research_failed", error=str(exc))
+            return []
+
+    @staticmethod
+    def _review_transport(routes: list[TransportRoute], dest: str) -> list[TransportRoute]:
+        """Review agent: keep only routes that actually FINISH at the destination.
+
+        A break journey that stops at a hub (e.g. Kochi when the trip is to Munnar)
+        is incomplete and confusing, so it's dropped. If reviewing would remove
+        everything, the original list is kept (better than nothing).
+        """
+        token = (dest or "").strip().lower().split(",")[0].split("(")[0].strip()
+        if not token:
+            return routes
+
+        def reaches(r: TransportRoute) -> bool:
+            if not r.legs:
+                return False
+            last = (r.legs[-1].to_place or "").lower()
+            # the final leg must land at the destination (or the route names it)
+            return token in last or token in (r.title or "").lower() or any(
+                token in (leg.to_place or "").lower() for leg in r.legs
+            )
+
+        kept = [r for r in routes if reaches(r)]
+        if len(kept) != len(routes):
+            log.info("transport_reviewed", dest=dest, kept=len(kept), total=len(routes))
+        return kept or routes
+
+    async def _budget_tiers(
+        self, brief: TripBrief, local_code: str | None, days: int
+    ) -> list[BudgetTier]:
+        """Rough Tavily-grounded cost tiers (very affordable / mid luxury / luxury)."""
+        dest = (brief.destination_city or "").strip()
+        if not dest:
+            return []
+        adults = brief.adults or 1
+        web = getattr(self.deps.researcher, "web", None)
+        context = ""
+        if web is not None:
+            try:
+                results = await web.search(
+                    f"approximate total cost of a {days}-day trip to {dest} for {adults} people "
+                    "— budget vs mid-range vs luxury, hotel price per night and daily food and "
+                    "local transport expenses",
+                    max_results=5,
+                )
+                context = "\n".join(
+                    f"- {getattr(r, 'title', '')}: {getattr(r, 'content', '')[:300]}"
+                    for r in results
+                )
+            except Exception as exc:  # pragma: no cover - resilience
+                log.warning("budget_tier_search_failed", error=str(exc))
+
+        prompt = (
+            f"Estimate the TOTAL trip cost for {adults} traveller(s) on a {days}-day trip to "
+            f"{dest}, as numbers in {local_code or 'the local currency'}, for THREE tiers named "
+            "EXACTLY: 'Very affordable', 'Mid luxury', 'Luxury'.\n"
+            "For each tier give: name, total (whole trip, all travellers — lodging + meals + "
+            "local transport + sightseeing; EXCLUDE long-haul airfare), and a short note (hotel "
+            "class + dining style). Make the tiers clearly different. Ground the numbers in this "
+            "web context where possible:\n" + (context or "(no extra context)")
+        )
+        try:
+            res: _BudgetTiers = await self.deps.model.with_structured_output(
+                _BudgetTiers
+            ).ainvoke(prompt)  # type: ignore[assignment]
+            return [t for t in (res.tiers or []) if t.name and t.total and t.total > 0][:3]
+        except Exception as exc:  # pragma: no cover - resilience
+            log.warning("budget_tier_failed", error=str(exc))
             return []
 
     # --- flights (search only; user selects in the next step) -----------
@@ -280,13 +463,16 @@ class Nodes:
                 else 5
             )
 
+            # Multi-stop trips fly one-way between hops; a single destination is
+            # a round trip (out and back).
+            multi = len(state.get("legs") or []) > 1
             async def _search(dep):  # noqa: ANN001, ANN202
                 return await self.deps.flights.search_flights(
                     FlightSearchQuery(
                         origin=origin,
                         destination=destination,
                         departure_date=dep,
-                        return_date=dep + timedelta(days=trip_len),
+                        return_date=None if multi else dep + timedelta(days=trip_len),
                         adults=brief.adults,
                         currency=brief.currency,
                     )
@@ -481,10 +667,17 @@ class Nodes:
             "(any festivals/holidays/events happening DURING the travel dates, else "
             "empty), best_known_for (one short line), description (2-3 sentence "
             "overview of the destination), local_language (the main language(s) "
-            "spoken), local_currency (the currency name and ISO code), and "
-            "local_currency_code (the ISO 4217 code only, e.g. INR, GBP, JPY).\n"
+            "spoken), local_currency (the currency name and ISO code), "
+            "local_currency_code (the ISO 4217 code only, e.g. INR, GBP, JPY), "
+            "estimated_total (a realistic mid-range TOTAL cost for the whole trip — lodging, "
+            "meals, local transport and sightseeing — as a number in local_currency_code, "
+            "excluding long-haul airfare), and home_currency_code (the ISO 4217 currency code "
+            f"of the traveller's HOME city '{brief.origin_city or 'unknown'}').\n"
             f"Destination: {brief.destination_city}\n"
+            f"Trip length: {brief.duration_days or ((brief.end_date - brief.start_date).days if brief.start_date and brief.end_date else 5)} days\n"
             f"Dates: {brief.start_date} to {brief.end_date}\n"
+            f"Travellers: {brief.adults} adult(s)\n"
+            f"Home city: {brief.origin_city or 'unknown'}\n"
             f"Hotel: {selections.hotel.name if selections.hotel else 'n/a'}\n"
             f"Interests: {', '.join(brief.interests) or 'general'}\n"
             f"Known preferences: {', '.join(state.get('memories') or []) or 'none'}\n"
@@ -497,27 +690,92 @@ class Nodes:
                 summary=f"Trip to {brief.destination_city}",
                 days=[ItineraryDay(day=1, title="Arrival", items=["Check in", "Explore"])],
             )
-        total = selections.total_cost()
+        booked = selections.total_cost()
         budget = state["budget"]
         currency = selections.currency(budget.currency)
-
-        # Convert the budget into the destination's local currency (real FX).
         local_code = itin.local_currency_code
-        local_total = budget.local_total
-        if self.deps.fx is not None and local_code:
+        # The traveller's home currency is FIXED for the whole trip — once leg 1
+        # establishes it, every later leg reuses it (don't let a chained origin
+        # like Tokyo flip it to JPY).
+        home_code = state.get("home_currency_code") or itin.home_currency_code or local_code
+        fx = self.deps.fx
+
+        async def _fx(amount: float, frm: str | None, to: str | None) -> float | None:
+            if amount is None or not frm or not to or fx is None:
+                return None
+            if frm == to:
+                return round(amount, 2)
             try:
-                local_total = await self.deps.fx.convert(total, currency, local_code)
+                return await fx.convert(amount, frm, to)
             except Exception as exc:  # pragma: no cover - resilience
                 log.warning("fx_convert_failed", error=str(exc))
-        new_budget = budget.model_copy(
-            update={"local_total": local_total, "local_currency": local_code}
+                return None
+
+        days = brief.duration_days or (
+            (brief.end_date - brief.start_date).days
+            if brief.start_date and brief.end_date else len(itin.days) or 1
         )
 
-        local_str = f" (≈ {local_total:.0f} {local_code})" if local_total is not None and local_code else ""
-        msg = AIMessage(
-            content=f"Draft itinerary ready ({total:.0f} {currency}{local_str}). Approve to reserve."
+        # Rough cost tiers (very affordable / mid luxury / luxury) when nothing
+        # bookable is priced. The plan defaults to the affordable tier.
+        tiers: list[BudgetTier] = []
+        selected_tier: str | None = None
+        estimated = booked <= 0
+        if estimated:
+            tiers = await self._budget_tiers(brief, local_code, days)
+            for t in tiers:  # add each tier's home-currency figure
+                t.home_total = await _fx(t.total, local_code, home_code)
+
+        affordable = None
+        if tiers:
+            affordable = next(
+                (t for t in tiers if "afford" in t.name.lower()),
+                min(tiers, key=lambda t: t.total),
+            )
+
+        if not estimated:
+            local_total = await _fx(booked, currency, local_code) if local_code else None
+            home_total = await _fx(booked, currency, home_code)
+            if home_total is None and home_code == currency:
+                home_total = booked
+        elif affordable is not None:
+            selected_tier = affordable.name
+            local_total = affordable.total
+            home_total = affordable.home_total
+        elif itin.estimated_total:  # fallback: single estimate
+            local_total = float(itin.estimated_total)
+            home_total = await _fx(local_total, local_code, home_code)
+        else:
+            local_total = home_total = None
+
+        new_budget = budget.model_copy(
+            update={
+                "local_total": local_total,
+                "local_currency": local_code,
+                "home_total": home_total,
+                "home_currency": home_code,
+                "estimated": estimated,
+                "tiers": tiers,
+                "selected_tier": selected_tier,
+            }
         )
-        return {"itinerary": itin, "budget": new_budget, "messages": [msg]}
+
+        shown = home_total if home_total is not None else (local_total if local_total is not None else booked)
+        shown_ccy = home_code or local_code or currency
+        prefix = (
+            f"Estimated trip cost ({selected_tier or 'affordable'})"
+            if estimated else "Draft itinerary ready"
+        )
+        msg = AIMessage(
+            content=f"{prefix}: ≈ {shown:.0f} {shown_ccy}. Ask me to switch to mid-luxury or "
+            "luxury, or change anything in the plan."
+        )
+        return {
+            "itinerary": itin,
+            "budget": new_budget,
+            "messages": [msg],
+            "home_currency_code": home_code,  # fix it for every subsequent leg
+        }
 
     # --- image curator (relevant photo per day) -------------------------
     async def curate_images(self, state: TripState) -> TripState:
@@ -549,12 +807,112 @@ class Nodes:
             landmarks = " ".join(d.items[:2])
             query = f"{dest} {d.title} {landmarks}".strip()[:120]
             url = await first_image(query)
-            if not url and batch:
-                url = batch[(i + 1) % len(batch)]  # fallback to the batch
+            if not url:  # always resolve to a working image (batch is relevance-validated)
+                url = batch[(i + 1) % len(batch)] if batch else hero
             day_urls.append(url)
 
         log.info("images_curated", days=len(day_urls))
         return {"done": done, "day_images": {"hero": hero, "days": day_urls}}
+
+    # --- finalize_leg (multi-stop loop) ---------------------------------
+    async def finalize_leg(self, state: TripState) -> TripState:
+        """Package the just-completed leg, then advance to the next one (or finish).
+
+        Single-destination trips have exactly one leg, so this runs once and sets
+        legs_complete=True without resetting anything.
+        """
+        brief = state["brief"]
+        assert brief is not None
+        sel = state["selections"]
+        legs = state.get("legs") or []
+        idx = state.get("leg_index", 0)
+
+        # Capture this leg's transport as a unified HopOption.
+        transport = None
+        if sel.flight is not None:
+            seg = sel.flight.segments[0]
+            last = sel.flight.segments[-1]
+            # Convert the fare into the traveller's home currency for a consistent UI.
+            home_ccy = state.get("home_currency_code") or (state.get("budget") and state["budget"].home_currency)
+            price_home = None
+            if self.deps.fx is not None and home_ccy and sel.flight.price.currency != home_ccy:
+                try:
+                    price_home = await self.deps.fx.convert(
+                        sel.flight.price.amount, sel.flight.price.currency, home_ccy
+                    )
+                except Exception as exc:  # pragma: no cover - resilience
+                    log.warning("fx_convert_failed", error=str(exc))
+            elif home_ccy and sel.flight.price.currency == home_ccy:
+                price_home = sel.flight.price.amount
+            transport = HopOption(
+                id=sel.flight.id, mode="Flight", icon="flight",
+                title=f"{seg.carrier_name or seg.carrier}{seg.flight_number} · {sel.flight.stops} stop"
+                + ("s" if sel.flight.stops != 1 else ""),
+                from_code=seg.origin, to_code=last.destination,
+                from_city=seg.origin_city, to_city=last.destination_city,
+                from_name=seg.origin_name, to_name=last.destination_name,
+                carrier_name=seg.carrier_name,
+                depart=seg.departure_at, arrive=last.arrival_at,
+                stops=sel.flight.stops,
+                price=sel.flight.price.amount, currency=sel.flight.price.currency,
+                currency_name=_currency_name(sel.flight.price.currency),
+                price_home=price_home, currency_home=(home_ccy if price_home is not None else None),
+                flight_id=sel.flight.id,
+            )
+        elif state.get("chosen_transport") is not None:
+            transport = state["chosen_transport"]  # a ground route the user picked
+
+        leg_plan = LegPlan(
+            destination_city=brief.destination_city or "",
+            start_date=brief.start_date,
+            end_date=brief.end_date,
+            transport=transport,
+            itinerary=state.get("itinerary"),
+            hotel=sel.hotel,
+            budget=state.get("budget"),
+            images=list(state.get("images") or []),
+            day_images=dict(state.get("day_images") or {}),
+        )
+        leg_plans = list(state.get("leg_plans") or []) + [leg_plan]
+
+        # More legs to plan?
+        if idx + 1 < len(legs):
+            nxt = legs[idx + 1]
+            start = brief.end_date  # depart the day this leg ends
+            next_brief = brief.model_copy(update={
+                "origin_city": brief.destination_city,
+                "destination_city": nxt.destination_city,
+                "start_date": start,
+                "duration_days": nxt.days,
+                "end_date": (start + timedelta(days=nxt.days or 3)) if start else None,
+            })
+            log.info("leg_advance", to=nxt.destination_city, index=idx + 1)
+            # Reset per-leg working state so the next leg plans cleanly.
+            return {
+                "leg_plans": leg_plans,
+                "leg_index": idx + 1,
+                "brief": next_brief,
+                "research": None,
+                "geo": None,
+                "images": [],
+                "day_images": {},
+                "flight_options": [],
+                "nearby_options": [],
+                "transport_options": [],
+                "flights_searched": False,
+                "flight_action": None,
+                "chosen_transport": None,
+                "local_trip": False,
+                "selections": Selections(),
+                "budget": BudgetState(currency=brief.currency),
+                "itinerary": None,
+                "done": {},
+                "messages": [AIMessage(content=f"Now planning {nxt.destination_city}…")],
+            }
+
+        # Last leg done.
+        log.info("legs_complete", count=len(leg_plans))
+        return {"leg_plans": leg_plans, "legs_complete": True}
 
     # --- reserve (human-in-the-loop) ------------------------------------
     async def reserve(self, state: TripState) -> TripState:

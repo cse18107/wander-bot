@@ -23,6 +23,7 @@ BUDGET = "budget"
 REPLAN = "replan"
 ITINERARY = "itinerary"
 CURATE_IMAGES = "curate_images"
+FINALIZE_LEG = "finalize_leg"
 RESERVE = "reserve"
 RESPOND = "respond"
 END = "__end__"
@@ -66,9 +67,15 @@ def decide_next(state: TripState) -> str:
     if state.get("itinerary") is None:
         return ITINERARY
 
-    # Itinerary ready -> curate per-day imagery, then human approval.
+    # Itinerary ready -> curate per-day imagery.
     if not done.get("images"):
         return CURATE_IMAGES
+
+    # This leg is fully planned. Package it (and loop to the next leg if any).
+    if not state.get("legs_complete"):
+        return FINALIZE_LEG
+
+    # All legs done -> human approval, then end.
     if state.get("approvals", {}).get("reserve") != "approved":
         return RESERVE
     return END

@@ -7,6 +7,7 @@ clear owner among the specialist nodes.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Literal, TypedDict
 
 from langchain_core.messages import AnyMessage
@@ -47,6 +48,15 @@ class Selections(BaseModel):
         return default
 
 
+class BudgetTier(BaseModel):
+    """A rough cost tier for the trip (e.g. 'Very affordable', 'Mid luxury', 'Luxury')."""
+
+    name: str
+    total: float  # whole-trip total in the destination's local currency
+    home_total: float | None = None  # same, converted to the traveller's home currency
+    note: str | None = None  # short: hotel class + dining style
+
+
 class BudgetState(BaseModel):
     target: float | None = None
     currency: str = "USD"
@@ -54,6 +64,14 @@ class BudgetState(BaseModel):
     total: float = 0.0
     local_total: float | None = None
     local_currency: str | None = None
+    # The figure shown to the user, in their HOME country's currency. When nothing
+    # bookable is priced, this is an estimate (estimated=True).
+    home_total: float | None = None
+    home_currency: str | None = None
+    estimated: bool = False
+    # Rough Tavily-grounded cost tiers; the plan defaults to the affordable one.
+    tiers: list[BudgetTier] = Field(default_factory=list)
+    selected_tier: str | None = None
 
 
 class ItineraryDay(BaseModel):
@@ -75,6 +93,14 @@ class Itinerary(BaseModel):
     local_language: str | None = None
     local_currency: str | None = None
     local_currency_code: str | None = Field(None, description="ISO 4217 code, e.g. INR, GBP, JPY")
+    estimated_total: float | None = Field(
+        None,
+        description="Realistic mid-range TOTAL cost for the whole trip — lodging, meals, "
+        "local transport and sightseeing — in local_currency_code. Exclude long-haul airfare.",
+    )
+    home_currency_code: str | None = Field(
+        None, description="ISO 4217 currency code of the traveller's HOME city's country"
+    )
 
 
 class TransportLeg(BaseModel):
@@ -98,6 +124,58 @@ class TransportRoute(BaseModel):
     note: str | None = None  # e.g. "Cheapest", "Fastest", "Most scenic"
 
 
+class TripLeg(BaseModel):
+    """A resolved stop in the trip: where, from where, and when."""
+
+    destination_city: str
+    origin_city: str | None = None  # previous stop (or home for the first leg)
+    start_date: date | None = None
+    end_date: date | None = None
+    days: int | None = None
+
+
+class HopOption(BaseModel):
+    """A unified transport choice for one hop — a flight, train, ferry, etc."""
+
+    id: str
+    mode: str  # "Flight" | "Train" | "Ferry" | "Bus" | "Road" | "Mixed"
+    icon: str = "flight"  # Material Symbols name
+    title: str  # e.g. "MU0556 · 2 stops" or "Shinkansen + ferry"
+    from_code: str | None = None
+    to_code: str | None = None
+    from_city: str | None = None
+    to_city: str | None = None
+    from_name: str | None = None  # full airport name
+    to_name: str | None = None
+    carrier_name: str | None = None
+    depart: str | None = None
+    arrive: str | None = None
+    duration: str | None = None
+    stops: int | None = None
+    price: float | None = None
+    currency: str | None = None
+    currency_name: str | None = None
+    price_home: float | None = None  # price converted to the traveller's home currency
+    currency_home: str | None = None
+    note: str | None = None
+    flight_id: str | None = None  # set if this is a real bookable Duffel flight
+    legs: list[TransportLeg] = Field(default_factory=list)  # for multi-leg ground journeys
+
+
+class LegPlan(BaseModel):
+    """The finished plan for one leg of a multi-stop trip."""
+
+    destination_city: str
+    start_date: date | None = None
+    end_date: date | None = None
+    transport: HopOption | None = None  # how the traveller reaches this stop
+    itinerary: "Itinerary | None" = None
+    hotel: HotelOffer | None = None
+    budget: BudgetState | None = None
+    images: list[str] = Field(default_factory=list)
+    day_images: dict[str, object] = Field(default_factory=dict)
+
+
 class TripState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     user_id: str
@@ -114,6 +192,16 @@ class TripState(TypedDict, total=False):
     local_trip: bool
     flights_searched: bool
     flight_action: str | None
+    # Multi-stop trips: ordered legs, the one being planned, finished leg plans,
+    # and the current hop's unified transport choices (flights + ground).
+    legs: list[TripLeg]
+    leg_index: int
+    leg_plans: list[LegPlan]
+    legs_complete: bool
+    home_currency_code: str | None  # the traveller's home currency, fixed across all legs
+    hop_options: list[HopOption]
+    hop_action: str | None
+    chosen_transport: HopOption | None  # ground route the user picked (no flight)
     selections: Selections
     budget: BudgetState
     itinerary: Itinerary | None
@@ -143,6 +231,14 @@ def initial_state(
         local_trip=False,
         flights_searched=False,
         flight_action=None,
+        legs=[],
+        leg_index=0,
+        leg_plans=[],
+        legs_complete=False,
+        home_currency_code=None,
+        hop_options=[],
+        hop_action=None,
+        chosen_transport=None,
         selections=Selections(),
         budget=BudgetState(),
         itinerary=None,

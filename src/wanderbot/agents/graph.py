@@ -31,6 +31,7 @@ _SPECIALISTS = [
     routing.REPLAN,
     routing.ITINERARY,
     routing.CURATE_IMAGES,
+    routing.FINALIZE_LEG,
     routing.RESERVE,
     routing.RESPOND,
 ]
@@ -66,6 +67,7 @@ def build_graph(
     graph.add_node(routing.REPLAN, nodes.replan)
     graph.add_node(routing.ITINERARY, nodes.itinerary)
     graph.add_node(routing.CURATE_IMAGES, nodes.curate_images)
+    graph.add_node(routing.FINALIZE_LEG, nodes.finalize_leg)
     graph.add_node(routing.RESERVE, nodes.reserve)
     graph.add_node(routing.RESPOND, nodes.respond)
 
