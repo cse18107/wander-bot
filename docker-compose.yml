@@ -4,14 +4,24 @@ services:
     env_file: .env
     environment:
       WB_DATABASE_URL: postgresql://wanderbot:wanderbot@postgres:5432/wanderbot
+      WB_APP_STORE_URL: postgresql://wanderbot:wanderbot@postgres:5432/wanderbot
       WB_REDIS_URL: redis://redis:6379/0
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  web:
+    build: ./ui
+    environment:
+      API_UPSTREAM: app:8000
+    ports:
+      - "8080:8080"
+    depends_on:
+      - app
 
   postgres:
     image: pgvector/pgvector:pg16

@@ -7,6 +7,10 @@ metadata:
     {{- include "wanderbot.labels" . | nindent 4 }}
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    # SSE streaming (plan generation): disable response buffering, long timeouts.
+    nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
 spec:
   tls:
     - hosts: [{{ .Values.ingress.host | quote }}]
@@ -15,10 +19,30 @@ spec:
     - host: {{ .Values.ingress.host }}
       http:
         paths:
-          - path: /
+          # API + health/metrics go to the backend.
+          - path: /api
             pathType: Prefix
             backend:
               service:
                 name: {{ .Release.Name }}-api
+                port: { number: 80 }
+          - path: /healthz
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port: { number: 80 }
+          - path: /metrics
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-api
+                port: { number: 80 }
+          # Everything else is the React SPA.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ .Release.Name }}-web
                 port: { number: 80 }
 {{- end }}

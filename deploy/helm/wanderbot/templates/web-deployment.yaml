@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-web
+  labels:
+    {{- include "wanderbot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "wanderbot.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 101            # nginx-unprivileged
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: web
+          image: {{ include "wanderbot.webImage" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.web.port }}
+          env:
+            # In-cluster, the SPA proxies /api to the API service.
+            - name: API_UPSTREAM
+              value: "{{ .Release.Name }}-api:80"
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: false   # nginx writes temp files under /tmp
+            capabilities: { drop: ["ALL"] }
+          readinessProbe:
+            httpGet: { path: /, port: {{ .Values.web.port }} }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /, port: {{ .Values.web.port }} }
+            periodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-web
+  labels:
+    {{- include "wanderbot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  selector:
+    app.kubernetes.io/component: web
+  ports:
+    - port: 80
+      targetPort: {{ .Values.web.port }}

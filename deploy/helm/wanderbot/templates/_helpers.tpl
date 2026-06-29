@@ -11,3 +11,7 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 {{- define "wanderbot.mcpImage" -}}
 {{ .Values.image.registry }}/{{ .Values.image.mcpRepository }}:{{ .Values.image.tag }}
 {{- end -}}
+
+{{- define "wanderbot.webImage" -}}
+{{ .Values.image.registry }}/{{ .Values.image.webRepository }}:{{ .Values.image.tag }}
+{{- end -}}
