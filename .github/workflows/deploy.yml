@@ -1,12 +1,9 @@
 name: CD
 
-# Deploy to the Lightsail box. Runs automatically after the CI workflow
-# succeeds on main (so untested code never deploys), or manually via the
-# "Run workflow" button.
+# Deploy to the Lightsail box on every push to main (build + health check on the
+# box is the safety net), or manually via the "Run workflow" button.
 on:
-  workflow_run:
-    workflows: ["CI"]
-    types: [completed]
+  push:
     branches: [main]
   workflow_dispatch:
 
@@ -16,13 +13,9 @@ concurrency:
 
 jobs:
   deploy:
-    # Manual runs always proceed; automatic runs only if CI passed.
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
       - name: Configure SSH
         run: |
