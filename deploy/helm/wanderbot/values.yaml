@@ -1,7 +1,7 @@
 # Default values. Override per environment (values-staging.yaml / values-prod.yaml).
 
 image:
-  registry: ghcr.io/triveous
+  registry: ghcr.io/cse18107
   apiRepository: wanderbot-api
   mcpRepository: wanderbot-mcp
   webRepository: wanderbot-web

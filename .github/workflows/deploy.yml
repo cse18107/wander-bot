@@ -12,7 +12,7 @@ permissions:
   id-token: write   # for OIDC to the cluster / registry
 
 env:
-  REGISTRY: ghcr.io/triveous
+  REGISTRY: ghcr.io/cse18107
 
 jobs:
   build:
