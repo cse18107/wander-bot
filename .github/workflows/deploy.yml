@@ -51,7 +51,7 @@ jobs:
           push: true
           tags: ${{ env.REGISTRY }}/wanderbot-web:${{ steps.meta.outputs.tag }}
       - name: Trivy scan (API image)
-        uses: aquasecurity/trivy-action@0.24.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/wanderbot-api:${{ steps.meta.outputs.tag }}
           exit-code: "1"
