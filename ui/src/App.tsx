@@ -415,12 +415,12 @@ export default function App() {
       <div className={`layout home${menuOpen ? " menu-open" : ""}`}>
         <header className="home-topbar">
           <button className="menu-btn" aria-label="Menu" onClick={() => setMenuOpen(true)}><Icon name="menu" /></button>
-          <div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Voyager AI</span></div>
+          <div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Roam</span></div>
           <ThemeToggle />
         </header>
         {menuOpen && <div className="drawer-backdrop" onClick={() => setMenuOpen(false)} />}
         <aside className="rail">
-          <div className="rail-top"><div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Voyager AI</span></div><div className="rail-top-actions"><ThemeToggle /><button className="menu-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><Icon name="close" /></button></div></div>
+          <div className="rail-top"><div className="brand"><Icon name="rocket_launch" className="brand-ic" /> <span>Roam</span></div><div className="rail-top-actions"><ThemeToggle /><button className="menu-close" aria-label="Close menu" onClick={() => setMenuOpen(false)}><Icon name="close" /></button></div></div>
           <button className="newplan" onClick={() => { setMenuOpen(false); setPlanId(""); resetPlan(); setScreen("plan"); }}><Icon name="add" /> New Plan</button>
           <div className="rail-spacer-sm" /><TripList />
           <div className="rail-spacer" />

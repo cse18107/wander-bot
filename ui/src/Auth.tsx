@@ -27,7 +27,7 @@ export default function Auth({ onAuthed }: { onAuthed: (token: string, email: st
   return (
     <div className="auth-wrap">
       <div className="auth-card">
-        <div className="brand big"><span className="material-symbols-outlined brand-ic">rocket_launch</span> <span>Voyager AI</span></div>
+        <div className="brand big"><span className="material-symbols-outlined brand-ic">rocket_launch</span> <span>Roam</span></div>
         <h2>{mode === "login" ? "Welcome back" : "Create your account"}</h2>
         <p className="muted small">Your trips are private and saved to your account.</p>
         <input type="email" placeholder="Email" value={email} onChange={(e) => setEmail(e.target.value)} onKeyDown={(e) => e.key === "Enter" && submit()} />
