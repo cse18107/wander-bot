@@ -8,7 +8,7 @@ import os
 import uuid
 from datetime import datetime, timezone
 
-from wanderbot.storage.db import get_conn
+from wanderbot.storage import db
 
 _ITERATIONS = 200_000
 
@@ -32,36 +32,36 @@ async def create_user(email: str, password: str, home_city: str | None = None) -
     email = email.strip().lower()
     if not email or "@" not in email or len(password) < 6:
         raise ValueError("invalid email or password too short (min 6)")
-    conn = await get_conn()
-    cur = await conn.execute("SELECT id FROM users WHERE email = ?", (email,))
-    if await cur.fetchone():
+    if await db.fetch_one("SELECT id FROM users WHERE email = :email", {"email": email}):
         raise ValueError("email already registered")
     uid = uuid.uuid4().hex
-    await conn.execute(
-        "INSERT INTO users (id, email, pw_hash, home_city, created_at) VALUES (?, ?, ?, ?, ?)",
-        (uid, email, hash_password(password), (home_city or None), datetime.now(timezone.utc).isoformat()),
+    await db.execute(
+        "INSERT INTO users (id, email, pw_hash, home_city, created_at) "
+        "VALUES (:id, :email, :pw, :home, :ts)",
+        {"id": uid, "email": email, "pw": hash_password(password),
+         "home": (home_city or None), "ts": datetime.now(timezone.utc).isoformat()},
     )
-    await conn.commit()
     return uid
 
 
 async def authenticate(email: str, password: str) -> str | None:
-    conn = await get_conn()
-    cur = await conn.execute("SELECT id, pw_hash FROM users WHERE email = ?", (email.strip().lower(),))
-    row = await cur.fetchone()
+    row = await db.fetch_one(
+        "SELECT id, pw_hash FROM users WHERE email = :email",
+        {"email": email.strip().lower()},
+    )
     if not row or not verify_password(password, row["pw_hash"]):
         return None
     return row["id"]
 
 
 async def get_user(user_id: str) -> dict | None:
-    conn = await get_conn()
-    cur = await conn.execute("SELECT id, email, home_city FROM users WHERE id = ?", (user_id,))
-    row = await cur.fetchone()
-    return dict(row) if row else None
+    return await db.fetch_one(
+        "SELECT id, email, home_city FROM users WHERE id = :id", {"id": user_id}
+    )
 
 
 async def set_home_city(user_id: str, home_city: str | None) -> None:
-    conn = await get_conn()
-    await conn.execute("UPDATE users SET home_city = ? WHERE id = ?", (home_city or None, user_id))
-    await conn.commit()
+    await db.execute(
+        "UPDATE users SET home_city = :home WHERE id = :id",
+        {"home": (home_city or None), "id": user_id},
+    )

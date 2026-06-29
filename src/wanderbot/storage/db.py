@@ -1,92 +1,133 @@
-"""SQLite app store (users + saved plans) — zero-config, runs without Postgres.
+"""App store (users + saved plans + chat threads) via SQLAlchemy async.
 
-A single shared aiosqlite connection (SQLite serializes writes) is fine for the
-demo's concurrency. Schema is created on first use.
+One code path serves both backends:
+- **dev**: SQLite (zero-config) when ``WB_APP_STORE_URL`` is unset.
+- **prod**: Postgres when ``WB_APP_STORE_URL`` is a ``postgresql://`` URL — required
+  because the API container runs with a read-only root filesystem (SQLite can't
+  write there).
+
+Queries use named (``:param``) binds, which work identically on both engines, and
+the ``ON CONFLICT(id) DO UPDATE`` upsert is supported by SQLite 3.24+ and Postgres.
 """
 
 from __future__ import annotations
 
-import asyncio
+from typing import Any
 
-import aiosqlite
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.pool import NullPool
 
 from wanderbot.config import get_settings
 from wanderbot.observability.logging import get_logger
 
 log = get_logger(__name__)
 
-_conn: aiosqlite.Connection | None = None
-_loop: asyncio.AbstractEventLoop | None = None
+_engine: AsyncEngine | None = None
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    id TEXT PRIMARY KEY,
-    email TEXT UNIQUE NOT NULL,
-    pw_hash TEXT NOT NULL,
-    home_city TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS plans (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    title TEXT,
-    destination TEXT,
-    hero TEXT,
-    data TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_plans_user ON plans(user_id);
-CREATE TABLE IF NOT EXISTS chat_threads (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL,
-    plan_id TEXT NOT NULL,
-    title TEXT,
-    messages TEXT NOT NULL DEFAULT '[]',
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_threads_user_plan ON chat_threads(user_id, plan_id);
-"""
-
-
-async def get_conn() -> aiosqlite.Connection:
-    """Shared connection, recreated if the running event loop changed.
-
-    aiosqlite binds a connection to the loop it was created on; tests (and any
-    multi-loop context) need it recreated when the loop differs.
+_SCHEMA = [
     """
-    global _conn, _loop
-    loop = asyncio.get_running_loop()
-    if _conn is not None and _loop is not loop:
-        try:
-            await _conn.close()
-        except Exception:
-            pass
-        _conn = None
-    if _conn is None:
-        path = get_settings().sqlite_path
-        _conn = await aiosqlite.connect(path)
-        _conn.row_factory = aiosqlite.Row
-        await _conn.executescript(_SCHEMA)
-        # Lightweight migration: add home_city to existing user tables.
-        try:
-            await _conn.execute("ALTER TABLE users ADD COLUMN home_city TEXT")
-        except Exception:
-            pass  # column already exists
-        await _conn.commit()
-        _loop = loop
-        log.info("sqlite_ready", path=path)
-    return _conn
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        pw_hash TEXT NOT NULL,
+        home_city TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS plans (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT,
+        destination TEXT,
+        hero TEXT,
+        data TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_plans_user ON plans(user_id)",
+    """
+    CREATE TABLE IF NOT EXISTS chat_threads (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        plan_id TEXT NOT NULL,
+        title TEXT,
+        messages TEXT NOT NULL DEFAULT '[]',
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_threads_user_plan ON chat_threads(user_id, plan_id)",
+]
+
+
+def _engine_url() -> str:
+    s = get_settings()
+    if s.app_store_url:
+        url = s.app_store_url
+        # Normalize to the async driver SQLAlchemy expects.
+        if url.startswith("postgresql://"):
+            url = url.replace("postgresql://", "postgresql+asyncpg://", 1)
+        elif url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql+asyncpg://", 1)
+        return url
+    return f"sqlite+aiosqlite:///{s.sqlite_path}"
+
+
+async def get_engine() -> AsyncEngine:
+    global _engine
+    if _engine is None:
+        url = _engine_url()
+        # NullPool for SQLite avoids connections being pinned to one event loop
+        # (matters for tests that spin up a loop per test); Postgres keeps a pool.
+        kwargs: dict[str, Any] = {"future": True}
+        if url.startswith("sqlite"):
+            kwargs["poolclass"] = NullPool
+        else:
+            kwargs["pool_pre_ping"] = True
+        _engine = create_async_engine(url, **kwargs)
+        async with _engine.begin() as conn:
+            for stmt in _SCHEMA:
+                await conn.execute(text(stmt))
+            # Legacy migration for older SQLite files missing home_city.
+            try:
+                await conn.execute(text("ALTER TABLE users ADD COLUMN home_city TEXT"))
+            except Exception:
+                pass  # column already exists / Postgres fresh schema
+        log.info("app_store_ready", backend="postgres" if "postgresql" in url else "sqlite")
+    return _engine
+
+
+# --- small query helpers (named :params work on both backends) ---------------
+async def fetch_one(sql: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    engine = await get_engine()
+    async with engine.connect() as conn:
+        row = (await conn.execute(text(sql), params or {})).mappings().first()
+        return dict(row) if row else None
+
+
+async def fetch_all(sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    engine = await get_engine()
+    async with engine.connect() as conn:
+        rows = (await conn.execute(text(sql), params or {})).mappings().all()
+        return [dict(r) for r in rows]
+
+
+async def execute(sql: str, params: dict[str, Any] | None = None) -> None:
+    engine = await get_engine()
+    async with engine.begin() as conn:
+        await conn.execute(text(sql), params or {})
 
 
 async def init_db() -> None:
-    await get_conn()
+    await get_engine()
 
 
 async def reset_conn() -> None:
-    """Test hook: close the cached connection."""
-    global _conn
-    if _conn is not None:
-        await _conn.close()
-        _conn = None
+    """Test hook: dispose the cached engine so the next call rebuilds it."""
+    global _engine
+    if _engine is not None:
+        await _engine.dispose()
+        _engine = None

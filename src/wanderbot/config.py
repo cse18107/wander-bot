@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     # --- Infra ---
     database_url: str = "postgresql://wanderbot:wanderbot@localhost:5432/wanderbot"
     redis_url: str = "redis://localhost:6379/0"
-    sqlite_path: str = "wanderbot.db"  # app store: users + saved plans
+    sqlite_path: str = "wanderbot.db"  # app store fallback (dev): users + saved plans
+    # App store DB. Unset -> SQLite (zero-config dev). Set to a Postgres URL in
+    # prod (the API runs read-only, so SQLite isn't writable there).
+    app_store_url: str | None = None
 
     # --- Security ---
     jwt_secret: SecretStr = Field(default=SecretStr("change-me-in-prod"))
