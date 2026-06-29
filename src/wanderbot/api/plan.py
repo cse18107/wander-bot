@@ -18,7 +18,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from wanderbot.agents import routing
-from wanderbot.agents.state import Itinerary, initial_state
+from wanderbot.agents.state import HopOption, Itinerary, Selections, initial_state
 from wanderbot.api.deps import get_principal, get_rate_limiter
 from wanderbot.observability.logging import get_logger
 from wanderbot.security import engine as guard_engine
@@ -103,16 +103,40 @@ def _thread(principal: Principal, thread_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": f"{principal.user_id}:{thread_id}"}}
 
 
+_CURRENCY_NAMES = {
+    "USD": "US Dollar", "EUR": "Euro", "GBP": "British Pound", "INR": "Indian Rupee",
+    "JPY": "Japanese Yen", "CNY": "Chinese Yuan", "AUD": "Australian Dollar",
+    "CAD": "Canadian Dollar", "SGD": "Singapore Dollar", "AED": "UAE Dirham",
+    "THB": "Thai Baht", "CHF": "Swiss Franc", "HKD": "Hong Kong Dollar",
+    "NZD": "New Zealand Dollar", "MYR": "Malaysian Ringgit", "IDR": "Indonesian Rupiah",
+    "KRW": "South Korean Won", "ZAR": "South African Rand", "BRL": "Brazilian Real",
+    "RUB": "Russian Ruble", "TRY": "Turkish Lira", "SAR": "Saudi Riyal", "NPR": "Nepalese Rupee",
+}
+
+
+def _currency_name(code: str | None) -> str | None:
+    if not code:
+        return None
+    return _CURRENCY_NAMES.get(code.upper(), code.upper())
+
+
 def _offer_to_dict(o, with_date: bool = False) -> dict[str, Any]:
     seg = o.segments[0]
+    last = o.segments[-1]
     d: dict[str, Any] = {
         "id": o.id,
         "price": o.price.model_dump(),
+        "currency_name": _currency_name(o.price.currency),
         "origin": seg.origin,
-        "destination": seg.destination,
+        "destination": last.destination,
+        "origin_name": seg.origin_name,
+        "origin_city": seg.origin_city,
+        "destination_name": last.destination_name,
+        "destination_city": last.destination_city,
         "depart": seg.departure_at,
-        "arrive": seg.arrival_at,
+        "arrive": last.arrival_at,
         "carrier": seg.carrier,
+        "carrier_name": seg.carrier_name,
         "number": seg.flight_number,
         "stops": o.stops,
     }
@@ -166,16 +190,31 @@ async def _stream_run(graph, inputs, config) -> AsyncIterator[dict]:
             hero = (data.get("day_images") or {}).get("hero") or (data.get("images") or [None])[0]
             title = itin.get("headline") or (itin.get("summary", "Trip").split(".")[0])
             await upsert_plan(pid, uid, title, brief.get("destination_city"), hero, data)
+            # Once every leg is planned, push the full leg data (carries the
+            # home-currency transport price; multi-stop renders them stacked).
+            if data.get("legs_complete") and data.get("legs"):
+                yield {"event": "legs", "data": json.dumps(data["legs"])}
     except Exception as exc:  # pragma: no cover - persistence best-effort
         log.warning("plan_save_failed", error=str(exc))
 
     # Paused for clarification, flight selection, or reserve approval?
     if state.next == (routing.SELECT_FLIGHT,):
+        # Leg context so the UI can say e.g. "Tokyo → Shanghai (leg 2 of 2)".
+        legs = state.values.get("legs") or []
+        brief_v = state.values.get("brief")
+        leg_ctx = {
+            "index": state.values.get("leg_index", 0),
+            "total": len(legs),
+            "from": (brief_v.origin_city if brief_v else None),
+            "to": (brief_v.destination_city if brief_v else None),
+        }
         options = state.values.get("flight_options") or []
         if options:
+            yield {"event": "leg_context", "data": json.dumps(leg_ctx)}
             payload = [_offer_to_dict(o) for o in options]
             yield {"event": "flight_options", "data": json.dumps(payload)}
         else:
+            yield {"event": "leg_context", "data": json.dumps(leg_ctx)}
             brief = state.values.get("brief")
             nearby = state.values.get("nearby_options") or []
             transport = state.values.get("transport_options") or []
@@ -288,7 +327,7 @@ async def select_flight(
     config = _thread(principal, req.thread_id)
     snap = await graph.aget_state(config)
     options = (snap.values.get("flight_options") or []) + (snap.values.get("nearby_options") or [])
-    sel = snap.values.get("selections")
+    sel = snap.values.get("selections") or Selections()
     chosen = next((o for o in options if o.id == req.flight_id), None) if req.flight_id else None
     new_sel = sel.model_copy(update={"flight": chosen})
 
@@ -309,6 +348,49 @@ async def select_flight(
             )
     audit("plan_select_flight", principal.user_id, flight=req.flight_id or "none")
     await graph.aupdate_state(config, update)
+    return EventSourceResponse(_stream_run(graph, None, config))
+
+
+class SelectTransportRequest(BaseModel):
+    thread_id: str = "default"
+    index: int = 0
+
+
+@router.post("/plan/select_transport")
+async def select_transport(
+    req: SelectTransportRequest,
+    principal: Principal = Depends(get_principal),
+) -> EventSourceResponse:
+    """User picked a ground route (train/bus/taxi) on the no-flights screen."""
+    graph = _get_graph()
+    config = _thread(principal, req.thread_id)
+    snap = await graph.aget_state(config)
+    routes = snap.values.get("transport_options") or []
+    if not (0 <= req.index < len(routes)):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid transport option")
+    route = routes[req.index]
+    rd = route if isinstance(route, dict) else route.model_dump()
+    legs = rd.get("legs") or []
+    first = legs[0] if legs else {}
+    last = legs[-1] if legs else {}
+    hop = HopOption(
+        id=f"ground-{req.index}",
+        mode=(first.get("mode") if len(legs) == 1 else "Multi-leg") or "Transit",
+        icon=first.get("icon") or "directions_transit",
+        title=rd.get("title") or "Ground route",
+        from_city=first.get("from_place"),
+        to_city=last.get("to_place"),
+        duration=rd.get("total_duration"),
+        note=rd.get("total_cost"),  # short string like "₹1,140"
+        legs=legs,
+    )
+    sel = snap.values.get("selections") or Selections()
+    audit("plan_select_transport", principal.user_id, route=hop.title)
+    await graph.aupdate_state(config, {
+        "chosen_transport": hop,
+        "selections": sel.model_copy(update={"flight": None}),
+        "flight_action": "proceed",
+    })
     return EventSourceResponse(_stream_run(graph, None, config))
 
 
@@ -334,6 +416,7 @@ async def change_date(
 class DayDetailRequest(BaseModel):
     thread_id: str = "default"
     day: int
+    leg: int | None = None  # which leg of a multi-stop trip (None = single trip)
 
 
 class _PlaceInfo(BaseModel):
@@ -347,10 +430,20 @@ class _WalkablePlace(BaseModel):
     walk_time_min: int = 10
 
 
+class _FoodItem(BaseModel):
+    name: str
+    veg: bool = True  # True = vegetarian, False = contains meat/fish/egg
+
+
+class _RestaurantInfo(BaseModel):
+    name: str
+    diet: str = ""  # "Pure veg" | "Veg & non-veg" | "Non-veg"
+
+
 class _DayDetailLLM(BaseModel):
     places: list[_PlaceInfo] = []
-    street_food: list[str] = []
-    restaurants: list[str] = []
+    street_food: list[_FoodItem] = []
+    restaurants: list[_RestaurantInfo] = []
     walkable: list[_WalkablePlace] = []
 
 
@@ -378,18 +471,38 @@ async def day_detail(
     if plan is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "plan not found")
     data = plan["data"]
-    cached = data.get("day_details", {}).get(str(req.day))
+    legs = data.get("legs") or []
+    use_leg = req.leg is not None and 0 <= req.leg < len(legs)
+    cache_key = f"{req.leg}:{req.day}" if use_leg else str(req.day)
+    cached = data.get("day_details", {}).get(cache_key)
     if cached:
         return cached  # instant on reopen
 
-    itin = data.get("itinerary")
     brief = data.get("brief") or {}
-    geo = data.get("geo")
+    if use_leg:
+        legd = legs[req.leg]
+        itin = legd.get("itinerary")
+        dest = legd.get("destination_city") or ""
+        start, end = legd.get("start_date"), legd.get("end_date")
+        # Legs don't persist geo; geocode the leg's city for seasonal weather.
+        geo = None
+        try:
+            from wanderbot.providers.openmeteo import OpenMeteoGeoProvider
+
+            g = await OpenMeteoGeoProvider().geocode_city(dest)
+            geo = {"latitude": g.latitude, "longitude": g.longitude} if g else None
+        except Exception:  # pragma: no cover - resilience
+            geo = None
+    else:
+        itin = data.get("itinerary")
+        dest = brief.get("destination_city") or ""
+        geo = data.get("geo")
+        start, end = brief.get("start_date"), brief.get("end_date")
+
     if not itin or req.day < 1 or req.day > len(itin.get("days", [])):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "invalid day")
     day = itin["days"][req.day - 1]
     day = type("D", (), {"day": day["day"], "title": day["title"], "items": day.get("items", [])})
-    dest = brief.get("destination_city") or ""
 
     from wanderbot.llm_factory import build_chat_model
 
@@ -399,8 +512,10 @@ async def day_detail(
         "Produce structured deep-dive details:\n"
         "- places: up to 4 notable places for this day; for each give how_to_reach "
         "(from the city centre) and best_vehicle (e.g. metro, taxi, walk, shared jeep).\n"
-        "- street_food: 3-5 famous street foods to try here.\n"
-        "- restaurants: 3-5 well-regarded restaurants.\n"
+        "- street_food: 3-5 famous street foods, each with veg=true if vegetarian or "
+        "veg=false if it contains meat/fish/egg.\n"
+        "- restaurants: 3-5 well-regarded restaurants, each with diet = one of 'Pure veg', "
+        "'Veg & non-veg', or 'Non-veg'.\n"
         "- walkable: places reachable on foot from a central point, each with an "
         "approximate walk_time_min.\nBe concise and realistic."
     )
@@ -410,7 +525,6 @@ async def day_detail(
 
     # Real seasonal weather (Open-Meteo archive). brief/geo are plain dicts here.
     weather = None
-    start, end = brief.get("start_date"), brief.get("end_date")
     if geo and start and end:
         from wanderbot.providers.weather import OpenMeteoWeatherProvider
 
@@ -443,20 +557,100 @@ async def day_detail(
             {"name": p.name, "how_to_reach": p.how_to_reach, "best_vehicle": p.best_vehicle, "image": url}
         )
 
+    from urllib.parse import quote_plus
+
+    def _maps(name: str) -> str:
+        return f"https://www.google.com/maps/search/?api=1&query={quote_plus(f'{name} {dest}'.strip())}"
+
     detail = {
         "day": day.day,
         "title": day.title,
+        "city": dest,
         "places": places_out,
         "weather": weather["summary"] if weather else None,
         "weather_detail": weather,
-        "street_food": llm.street_food,
-        "restaurants": llm.restaurants,
+        "street_food": [{"name": f.name, "veg": f.veg} for f in llm.street_food],
+        "restaurants": [{"name": r.name, "diet": r.diet, "link": _maps(r.name)} for r in llm.restaurants],
         "walkable": [w.model_dump() for w in llm.walkable],
         "images": gallery,
     }
     # Cache so reopening the day is instant and free.
-    await save_day_detail(req.thread_id, principal.user_id, req.day, detail)
+    await save_day_detail(req.thread_id, principal.user_id, cache_key, detail)
     return detail
+
+
+class PlaceDetailRequest(BaseModel):
+    thread_id: str = "default"
+    name: str
+    city: str | None = None
+
+
+class _PlaceDetailLLM(BaseModel):
+    description: str = ""
+    kind: str | None = None  # e.g. "Buddhist monastery", "Market", "Viewpoint"
+    how_to_reach: str | None = None
+    best_time: str | None = None
+    highlights: list[str] = []
+
+
+@router.post("/plan/place_detail")
+async def place_detail(
+    req: PlaceDetailRequest,
+    principal: Principal = Depends(get_principal),
+) -> dict[str, Any]:
+    """On-demand detail + extra photos for a single place (clicked from a card)."""
+    name = (req.name or "").strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing place name")
+    city = req.city
+    if not city:
+        plan = await get_plan(req.thread_id, principal.user_id)
+        if plan:
+            city = (plan["data"].get("brief") or {}).get("destination_city")
+
+    from wanderbot.llm_factory import build_chat_model
+
+    prompt = (
+        f"Give concise, accurate traveller details about '{name}'"
+        + (f" in {city}" if city else "")
+        + ". Provide: description (2-3 sentences), kind (e.g. temple, market, museum, "
+        "viewpoint, park), how_to_reach (from the city centre), best_time to visit, and "
+        "3-4 short highlights. If something is genuinely unknown, leave it null."
+    )
+    try:
+        info: _PlaceDetailLLM = await build_chat_model().with_structured_output(
+            _PlaceDetailLLM
+        ).ainvoke(prompt)  # type: ignore[assignment]
+    except Exception as exc:  # pragma: no cover - resilience
+        log.warning("place_detail_failed", error=str(exc))
+        info = _PlaceDetailLLM(description="")
+
+    safe_desc = info.description
+    try:
+        out = await guard_engine.guard_output(info.description)
+        safe_desc = out.text if out.allowed else info.description
+    except Exception:  # pragma: no cover
+        pass
+
+    from wanderbot.providers.tavily import TavilyProvider
+
+    images: list[str] = []
+    try:
+        results = await TavilyProvider().images(f"{name} {city or ''}".strip(), max_results=8)
+        images = [i.url for i in results[:6]]
+    except Exception:  # pragma: no cover - resilience
+        images = []
+
+    return {
+        "name": name,
+        "city": city,
+        "description": safe_desc,
+        "kind": info.kind,
+        "how_to_reach": info.how_to_reach,
+        "best_time": info.best_time,
+        "highlights": info.highlights,
+        "images": images,
+    }
 
 
 class AskRequest(BaseModel):
@@ -665,11 +859,99 @@ async def run_trip_agent(
         changed["plan"] = data
         return "Done — I've updated the plan."
 
+    def _match_tier(tiers: list[dict[str, Any]], q: str) -> dict[str, Any] | None:
+        q = (q or "").strip().lower()
+        names = [(t, (t.get("name") or "").lower()) for t in tiers]
+        # 1) exact name
+        for t, n in names:
+            if n == q:
+                return t
+        # 2) intent keywords (luxury must NOT match 'mid luxury')
+        if ("lux" in q or "premium" in q or "lavish" in q or "ultimate" in q) and "mid" not in q:
+            return next((t for t, n in names if "luxur" in n and "mid" not in n), None) \
+                or max(tiers, key=lambda t: t.get("total") or 0)
+        if "mid" in q or "moder" in q or "comfort" in q:
+            return next((t for t, n in names if "mid" in n or "moder" in n), None)
+        if any(k in q for k in ("afford", "cheap", "budget", "econom", "low")):
+            return min(tiers, key=lambda t: t.get("total") or 0)
+        # 3) loose substring
+        return next((t for t, n in names if q and (q in n or n in q)), None)
+
+    async def _restyle_itinerary(itin_dict: dict[str, Any], dest: str, tier_name: str, tier_note: str) -> dict[str, Any]:
+        if not itin_dict:
+            return itin_dict
+        prompt = (
+            f"Rewrite this {dest} itinerary to match a '{tier_name}' travel style: {tier_note}. "
+            "Keep the SAME number of days and the same core destinations/landmarks, but adjust "
+            "accommodation, dining, transport and experiences to fit this tier (luxury -> 5-star "
+            "resorts, fine dining, private guided tours; mid -> comfortable 3-4 star hotels and a "
+            "mix of dining; affordable -> guesthouses, street food, public transport). Return the "
+            f"FULL updated itinerary.\n\nCurrent itinerary JSON:\n{json.dumps(itin_dict)[:2800]}"
+        )
+        try:
+            new_itin: Itinerary = await model.with_structured_output(Itinerary).ainvoke(prompt)  # type: ignore[assignment]
+            return new_itin.model_dump(mode="json")
+        except Exception as exc:  # pragma: no cover
+            log.warning("restyle_itinerary_failed", error=str(exc))
+            return itin_dict
+
+    async def _set_budget_tier(tier: str) -> str:
+        """Switch the budget tier AND restyle the plan to match it."""
+        b = data.get("budget") or {}
+        tiers = b.get("tiers") or []
+        if not tiers:
+            return "This trip doesn't have budget tiers yet."
+        chosen = _match_tier(tiers, tier)
+        if chosen is None:
+            names = ", ".join(t.get("name", "") for t in tiers)
+            return f"I couldn't match that tier. Options: {names}."
+
+        brief = data.get("brief") or {}
+        dest = brief.get("destination_city") or ""
+        tier_name = chosen.get("name") or tier
+        tier_note = chosen.get("note") or ""
+
+        b["selected_tier"] = tier_name
+        b["local_total"] = chosen.get("total")
+        b["home_total"] = chosen.get("home_total")
+        b["estimated"] = True
+        data["budget"] = b
+
+        # Restyle the actual plan (hotels/dining/experiences) to fit the tier.
+        if data.get("itinerary"):
+            data["itinerary"] = await _restyle_itinerary(data["itinerary"], dest, tier_name, tier_note)
+
+        # Multi-stop: update each leg's tier + itinerary too.
+        for leg in (data.get("legs") or []):
+            lb = leg.get("budget") or {}
+            lt = _match_tier(lb.get("tiers") or [], tier_name) if lb.get("tiers") else None
+            if lt:
+                lb["selected_tier"] = lt.get("name")
+                lb["local_total"] = lt.get("total")
+                lb["home_total"] = lt.get("home_total")
+                lb["estimated"] = True
+                leg["budget"] = lb
+            if leg.get("itinerary"):
+                leg["itinerary"] = await _restyle_itinerary(
+                    leg["itinerary"], leg.get("destination_city") or dest, tier_name, lt.get("note") if lt else tier_note
+                )
+
+        itin = data.get("itinerary") or {}
+        title = itin.get("headline") or itin.get("summary", "Trip").split(".")[0]
+        await upsert_plan(plan["id"], principal.user_id, title, brief.get("destination_city"), plan["hero"], data)
+        changed["plan"] = data
+        ccy = b.get("home_currency") or b.get("local_currency") or ""
+        amt = chosen.get("home_total") or chosen.get("total") or 0
+        return f"Switched to {tier_name} (≈ {round(amt):,} {ccy}) and refreshed the plan — upgraded the stays, dining and experiences to match."
+
     tools = [
         StructuredTool.from_function(coroutine=_web_search, name="web_search",
             description="Search the web for current information (events, hours, weather, prices)."),
         StructuredTool.from_function(coroutine=_modify_plan, name="modify_plan",
             description="Apply a change to the trip plan — edit a day's activities, swap focus, or remove the hotel. Pass the user's requested change as text."),
+        StructuredTool.from_function(coroutine=_set_budget_tier, name="set_budget_tier",
+            description="Switch the trip's budget tier when the user wants a cheaper or more "
+            "premium trip. Pass the tier they want: 'very affordable', 'mid luxury', or 'luxury'."),
         StructuredTool.from_function(coroutine=_attach_images, name="attach_images", args_schema=_AttachArgs,
             description="Attach photo cards to your reply. places = list of {name, price (optional, for the requested duration), currency (ISO code), note (optional, short)}. per_subject = images each (1 for a list, 6 to show many of one place). ALWAYS price in the destination's LOCAL currency."),
         StructuredTool.from_function(coroutine=_show_options, name="show_options", args_schema=_OptionsArgs,
@@ -695,6 +977,9 @@ async def run_trip_agent(
         "• web_search — for live facts (opening hours, events, weather, prices).\n"
         "• modify_plan — when the user wants to change the trip ('change day 3', "
         "'I don't want this hotel').\n"
+        "• set_budget_tier — when the user wants a cheaper or more premium trip "
+        "('make it luxury', 'go cheaper', 'mid-range'). The plan defaults to the "
+        "affordable tier.\n"
         "• show_options — whenever the user wants to COMPARE choices (transport modes, ticket "
         "types, passes, ways to get somewhere) with attributes like time/cost. Call it instead "
         "of writing a bullet list: YOU pick a fitting icon per option and per stat, and the UI "
@@ -716,9 +1001,38 @@ async def run_trip_agent(
         "write ONLY a one-line intro and do NOT repeat the names/prices as a "
         "bullet/numbered list — the cards already show name, photo and price.\n"
         "Example: user 'price of each hotel for 2 nights' -> call attach_images(places=[{name, "
-        "price, currency}], per_subject=1), then reply with just a one-line intro.\n\n"
+        "price, currency}], per_subject=1), then reply with just a one-line intro.\n"
+        "FOOD & RESTAURANTS: when you list FOODS, mark each clearly as 🟢 veg or 🔴 non-veg. "
+        "When you recommend RESTAURANTS, say whether each is veg or non-veg and add a Google "
+        "Maps link in this exact form: https://www.google.com/maps/search/?api=1&query=NAME+"
+        + (dest.replace(" ", "+") if dest else "city") + " (replace NAME with the restaurant, "
+        "spaces as +). Links render as clickable.\n\n"
         "TRIP PLAN:\n" + _plan_context(data)
     )
+    # Deterministic budget-tier switch — the LLM is unreliable at choosing the
+    # tool, so handle a clear "make it luxury / go cheaper" request directly.
+    ql_tier = question.lower()
+    if (data.get("budget") or {}).get("tiers"):
+        target = None
+        if "luxur" in ql_tier and "mid" not in ql_tier:
+            target = "luxury"
+        elif any(k in ql_tier for k in ("mid luxury", "mid-luxury", "midrange", "mid range", "moderate", "comfort")):
+            target = "mid luxury"
+        elif any(k in ql_tier for k in ("affordable", "cheaper", "cheap", "budget-friendly", "economical", "low budget", "tight budget", "save money")):
+            target = "very affordable"
+        change_intent = any(k in ql_tier for k in (
+            "change", "switch", "upgrade", "downgrade", "make it", "go ", "move to",
+            "set to", "want", "according", "increase", "raise", "afford", "premium", "lavish",
+        ))
+        if target and change_intent:
+            result = await _set_budget_tier(target)
+            out = await guard_engine.guard_output(result)
+            return {
+                "answer": out.text if out.allowed else result,
+                "plan": changed["plan"],
+                "cards": None,
+            }
+
     agent = create_react_agent(model, tools, prompt=system)
 
     msgs: list[Any] = []
@@ -776,6 +1090,8 @@ async def run_trip_agent(
                 if len(image_cards) == 1
                 else "Here are some photos:"
             )
+        elif changed["plan"] is not None:
+            answer = "Done — I've updated your plan."
         else:
             answer = "I couldn't find anything to show for that — could you rephrase?"
 

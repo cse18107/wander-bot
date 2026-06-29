@@ -113,17 +113,27 @@ class DuffelFlightProvider:
         for offer in offers[:max_results]:
             slices = offer.get("slices", [])
             segments: list[FlightSegment] = []
-            for sl in slices:
+            # Only the OUTBOUND slice represents the journey to the destination;
+            # including the return slice would make the last stop look like 'home'.
+            for sl in slices[:1]:
                 for seg in sl.get("segments", []):
-                    carrier = (seg.get("marketing_carrier") or {}).get("iata_code", "")
+                    mc = seg.get("marketing_carrier") or {}
+                    carrier = mc.get("iata_code", "")
+                    org = seg.get("origin") or {}
+                    dst = seg.get("destination") or {}
                     segments.append(
                         FlightSegment(
-                            origin=seg["origin"]["iata_code"],
-                            destination=seg["destination"]["iata_code"],
+                            origin=org.get("iata_code", ""),
+                            destination=dst.get("iata_code", ""),
                             departure_at=seg.get("departing_at", ""),
                             arrival_at=seg.get("arriving_at", ""),
                             carrier=carrier,
                             flight_number=str(seg.get("marketing_carrier_flight_number", "")),
+                            origin_name=org.get("name"),
+                            origin_city=org.get("city_name") or (org.get("city") or {}).get("name"),
+                            destination_name=dst.get("name"),
+                            destination_city=dst.get("city_name") or (dst.get("city") or {}).get("name"),
+                            carrier_name=mc.get("name"),
                         )
                     )
             stops = max(len(slices[0].get("segments", [])) - 1, 0) if slices else 0

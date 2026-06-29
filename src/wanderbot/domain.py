@@ -29,6 +29,12 @@ class FlightSegment(BaseModel):
     arrival_at: str
     carrier: str
     flight_number: str
+    # Human-friendly detail so the UI never shows bare IATA codes.
+    origin_name: str | None = None  # e.g. "Netaji Subhas Chandra Bose Intl"
+    origin_city: str | None = None  # e.g. "Kolkata"
+    destination_name: str | None = None
+    destination_city: str | None = None
+    carrier_name: str | None = None  # e.g. "China Eastern Airlines"
 
 
 class FlightOffer(BaseModel):

@@ -60,3 +60,14 @@ class Researcher:
         except Exception as exc:  # pragma: no cover - degrade gracefully
             log.warning("image_fetch_failed", error=str(exc))
             return []
+
+    async def fetch_images_described(self, query: str, n: int = 8) -> list[tuple[str, str]]:
+        """Image (url, description) pairs so results can be relevance-checked."""
+        if self._web is None:
+            return []
+        try:
+            images = await self._web.images(query, max_results=n)
+            return [(img.url, img.description or "") for img in images]
+        except Exception as exc:  # pragma: no cover - degrade gracefully
+            log.warning("image_fetch_failed", error=str(exc))
+            return []
