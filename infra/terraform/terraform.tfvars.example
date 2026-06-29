@@ -1,0 +1,24 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+
+region  = "us-east-1"
+project = "wanderbot"
+env     = "prod"
+
+# GitHub repo that runs the CD workflow.
+github_owner = "cse18107"
+github_repo  = "wander-bot"
+
+# IAM principals (your CLI user/role ARN) to grant cluster-admin.
+# Find yours with: aws sts get-caller-identity
+cluster_admin_arns = [
+  # "arn:aws:iam::123456789012:user/you",
+]
+
+domain = "wanderbot.yourdomain.com"
+
+# Provider API keys — prefer TF_VAR_* env vars or a *.auto.tfvars that is gitignored.
+# openai_api_key       = "sk-..."
+# google_api_key       = "..."
+# duffel_api_key       = "duffel_live_..."
+# tavily_api_key       = "tvly-..."
+# bedrock_guardrail_id = "gr-..."
