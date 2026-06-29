@@ -73,7 +73,3 @@ React UI ──▶ FastAPI (auth · guardrails · SSE) ──▶ LangGraph orche
 | `src/wanderbot/agents/` | graph, supervisor, specialists |
 | `mcp_server/` | standalone MCP server |
 | `tests/` | unit · integration · agents · evals · redteam |
-
-## License
-
-MIT
