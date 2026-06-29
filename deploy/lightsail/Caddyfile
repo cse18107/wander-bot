@@ -1,0 +1,15 @@
+# Automatic HTTPS via Let's Encrypt for the Roam app.
+# SITE_ADDRESS comes from the environment (set in docker-compose.prod.yml),
+# defaulting to the DuckDNS domain. Caddy provisions + renews the TLS cert
+# automatically and redirects HTTP -> HTTPS.
+
+{$SITE_ADDRESS} {
+	encode gzip
+
+	# Proxy everything to the Nginx frontend, which serves the SPA and
+	# forwards /api to the backend. flush_interval -1 keeps SSE streaming
+	# (the plan endpoint) unbuffered.
+	reverse_proxy web:8080 {
+		flush_interval -1
+	}
+}
