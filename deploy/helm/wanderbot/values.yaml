@@ -49,14 +49,20 @@ env:
   WB_AMADEUS_ENV: production
   WB_AWS_REGION: us-east-1
 
+# Private images (GHCR): name(s) of dockerconfigjson pull secrets in the namespace.
+imagePullSecrets: []
+# - name: ghcr-pull
+
 # Secrets are pulled from a secrets manager via External Secrets Operator.
 externalSecrets:
   enabled: true
   secretStoreRef: aws-secrets-manager
-  remoteKeyPrefix: wanderbot/prod
+  remoteKey: wanderbot/prod   # the JSON secret in Secrets Manager
 
 ingress:
   enabled: true
+  className: nginx
+  clusterIssuer: letsencrypt-prod   # cert-manager auto-issues TLS
   host: wanderbot.example.com
   tlsSecret: wanderbot-tls
 

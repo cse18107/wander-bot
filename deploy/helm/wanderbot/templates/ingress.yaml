@@ -11,7 +11,11 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-buffering: "off"
     nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    {{- if .Values.ingress.clusterIssuer }}
+    cert-manager.io/cluster-issuer: {{ .Values.ingress.clusterIssuer | quote }}
+    {{- end }}
 spec:
+  ingressClassName: {{ .Values.ingress.className | default "nginx" }}
   tls:
     - hosts: [{{ .Values.ingress.host | quote }}]
       secretName: {{ .Values.ingress.tlsSecret }}

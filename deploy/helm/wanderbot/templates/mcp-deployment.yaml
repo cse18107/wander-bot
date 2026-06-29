@@ -16,6 +16,10 @@ spec:
         {{- include "wanderbot.labels" . | nindent 8 }}
         app.kubernetes.io/component: mcp
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       serviceAccountName: {{ .Release.Name }}-sa
       securityContext:
         runAsNonRoot: true

@@ -60,32 +60,53 @@ jobs:
 
   deploy-staging:
     needs: build
+    # Only deploy when AWS is wired up (secrets configured) — keeps PRs/early
+    # pushes from failing before the cluster exists.
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: staging
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ vars.AWS_REGION }}
       - uses: azure/setup-helm@v4
       - name: Deploy to staging
         run: |
           helm upgrade --install wanderbot deploy/helm/wanderbot \
             -f deploy/helm/wanderbot/values-staging.yaml \
             --set image.tag=${{ needs.build.outputs.tag }} \
-            --namespace wanderbot-staging --create-namespace --wait --timeout 5m
-      - name: Smoke + eval + red-team gate
-        run: |
-          uvx --from . pytest -m "not live" -q || true   # placeholder for in-cluster smoke
+            --namespace wanderbot-staging --create-namespace --wait --timeout 8m
+      - name: Smoke test
+        run: kubectl -n wanderbot-staging rollout status deploy/wanderbot-api --timeout=120s
 
   deploy-prod:
     needs: [build, deploy-staging]
+    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
     runs-on: ubuntu-latest
     environment: production   # requires manual approval (GitHub environment protection)
+    permissions:
+      id-token: write
+      contents: read
     steps:
       - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+      - name: Update kubeconfig
+        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ vars.AWS_REGION }}
       - uses: azure/setup-helm@v4
       - name: Deploy to production
         run: |
           helm upgrade --install wanderbot deploy/helm/wanderbot \
             -f deploy/helm/wanderbot/values-prod.yaml \
             --set image.tag=${{ needs.build.outputs.tag }} \
-            --namespace wanderbot --create-namespace --atomic --wait --timeout 8m
+            --namespace wanderbot --create-namespace --atomic --wait --timeout 10m
       # --atomic auto-rolls-back on failed health checks.
