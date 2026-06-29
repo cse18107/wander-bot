@@ -1,0 +1,79 @@
+name: wanderbot
+
+# Single-box production stack for AWS Lightsail (2 GB).
+# Builds the API + web images from source on the box, runs Postgres + Redis
+# alongside, and serves the app over HTTP on port 80 (IP-only for now).
+#
+#   docker compose -f deploy/lightsail/docker-compose.prod.yml up -d --build
+#
+# Memory is capped on the supporting services so the Python API keeps headroom
+# on a 2 GB instance (plus the 2 GB swap file we added).
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      WB_ENV: production
+      WB_DATABASE_URL: postgresql://wanderbot:${POSTGRES_PASSWORD}@postgres:5432/wanderbot
+      WB_APP_STORE_URL: postgresql://wanderbot:${POSTGRES_PASSWORD}@postgres:5432/wanderbot
+      WB_REDIS_URL: redis://redis:6379/0
+    expose:
+      - "8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ../../ui
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      API_UPSTREAM: app:8000
+    ports:
+      - "80:8080"
+    mem_limit: 128m
+    depends_on:
+      - app
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: wanderbot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: wanderbot
+    command: >
+      postgres
+      -c shared_buffers=96MB
+      -c max_connections=50
+      -c effective_cache_size=256MB
+      -c work_mem=4MB
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    mem_limit: 384m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U wanderbot"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru --save ""
+    mem_limit: 192m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

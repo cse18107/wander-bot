@@ -16,7 +16,7 @@ from wanderbot.config import Settings, get_settings
 
 CHAT_DEFAULTS: dict[str, str] = {
     "openai": "gpt-4o-mini",
-    "gemini": "gemini-1.5-flash",
+    "gemini": "gemini-2.5-flash",
     "anthropic": "claude-3-5-sonnet-latest",
 }
 

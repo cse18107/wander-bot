@@ -88,15 +88,21 @@ async def get_engine() -> AsyncEngine:
         else:
             kwargs["pool_pre_ping"] = True
         _engine = create_async_engine(url, **kwargs)
+        is_postgres = "postgresql" in url
         async with _engine.begin() as conn:
             for stmt in _SCHEMA:
                 await conn.execute(text(stmt))
-            # Legacy migration for older SQLite files missing home_city.
+        # Legacy migration for older SQLite files missing home_city. Run in its
+        # OWN transaction: on Postgres any failed statement aborts the whole
+        # transaction, which would roll back the CREATE TABLEs above. The fresh
+        # Postgres schema already has home_city, so this is SQLite-only.
+        if not is_postgres:
             try:
-                await conn.execute(text("ALTER TABLE users ADD COLUMN home_city TEXT"))
+                async with _engine.begin() as conn:
+                    await conn.execute(text("ALTER TABLE users ADD COLUMN home_city TEXT"))
             except Exception:
-                pass  # column already exists / Postgres fresh schema
-        log.info("app_store_ready", backend="postgres" if "postgresql" in url else "sqlite")
+                pass  # column already exists
+        log.info("app_store_ready", backend="postgres" if is_postgres else "sqlite")
     return _engine
 
 

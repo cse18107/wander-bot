@@ -1,112 +1,50 @@
 name: CD
 
+# Deploy to the Lightsail box. Runs automatically after the CI workflow
+# succeeds on main (so untested code never deploys), or manually via the
+# "Run workflow" button.
 on:
-  push:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
     branches: [main]
-    tags: ["v*"]
   workflow_dispatch:
 
-permissions:
-  contents: read
-  packages: write
-  id-token: write   # for OIDC to the cluster / registry
-
-env:
-  REGISTRY: ghcr.io/cse18107
+concurrency:
+  group: deploy-lightsail
+  cancel-in-progress: false
 
 jobs:
-  build:
+  deploy:
+    # Manual runs always proceed; automatic runs only if CI passed.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    outputs:
-      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
-      - id: meta
-        run: echo "tag=${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build & push API image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile
-          push: true
-          tags: ${{ env.REGISTRY }}/wanderbot-api:${{ steps.meta.outputs.tag }}
-      - name: Build & push MCP image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.mcp
-          push: true
-          tags: ${{ env.REGISTRY }}/wanderbot-mcp:${{ steps.meta.outputs.tag }}
-      - name: Build & push Web (frontend) image
-        uses: docker/build-push-action@v6
-        with:
-          context: ui
-          file: ui/Dockerfile
-          push: true
-          tags: ${{ env.REGISTRY }}/wanderbot-web:${{ steps.meta.outputs.tag }}
-      - name: Trivy scan (API image)
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.REGISTRY }}/wanderbot-api:${{ steps.meta.outputs.tag }}
-          exit-code: "1"
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
 
-  deploy-staging:
-    needs: build
-    # Only deploy when AWS is wired up (secrets configured) — keeps PRs/early
-    # pushes from failing before the cluster exists.
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    environment: staging
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ vars.AWS_REGION }}
-      - uses: azure/setup-helm@v4
-      - name: Deploy to staging
+      - name: Configure SSH
         run: |
-          helm upgrade --install wanderbot deploy/helm/wanderbot \
-            -f deploy/helm/wanderbot/values-staging.yaml \
-            --set image.tag=${{ needs.build.outputs.tag }} \
-            --namespace wanderbot-staging --create-namespace --wait --timeout 8m
-      - name: Smoke test
-        run: kubectl -n wanderbot-staging rollout status deploy/wanderbot-api --timeout=120s
+          mkdir -p ~/.ssh
+          echo "${{ secrets.LIGHTSAIL_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "${{ secrets.LIGHTSAIL_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-  deploy-prod:
-    needs: [build, deploy-staging]
-    if: ${{ vars.DEPLOY_ENABLED == 'true' }}
-    runs-on: ubuntu-latest
-    environment: production   # requires manual approval (GitHub environment protection)
-    permissions:
-      id-token: write
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-      - uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
-          aws-region: ${{ vars.AWS_REGION }}
-      - name: Update kubeconfig
-        run: aws eks update-kubeconfig --name ${{ vars.EKS_CLUSTER }} --region ${{ vars.AWS_REGION }}
-      - uses: azure/setup-helm@v4
-      - name: Deploy to production
+      - name: Sync source to server
         run: |
-          helm upgrade --install wanderbot deploy/helm/wanderbot \
-            -f deploy/helm/wanderbot/values-prod.yaml \
-            --set image.tag=${{ needs.build.outputs.tag }} \
-            --namespace wanderbot --create-namespace --atomic --wait --timeout 10m
-      # --atomic auto-rolls-back on failed health checks.
+          rsync -avz --delete \
+            --exclude '.git' --exclude 'node_modules' --exclude 'ui/node_modules' \
+            --exclude '.venv' --exclude '__pycache__' --exclude '*.db' \
+            --exclude '.env' --exclude 'infra' \
+            -e "ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no" \
+            ./ ubuntu@${{ secrets.LIGHTSAIL_HOST }}:~/wanderbot/
+
+      - name: Build & restart on server
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ubuntu@${{ secrets.LIGHTSAIL_HOST }} \
+            'cd ~/wanderbot/deploy/lightsail && \
+             docker compose -f docker-compose.prod.yml up -d --build && \
+             docker image prune -f && \
+             docker compose -f docker-compose.prod.yml ps'
