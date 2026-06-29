@@ -32,15 +32,17 @@ jobs:
       - name: Set up Python
         run: uv python install 3.12
       - name: Install
-        run: uv pip install --system --break-system-packages ".[dev]"
+        run: |
+          uv venv
+          uv pip install ".[dev]"
       - name: Ruff
-        run: ruff check src tests
+        run: uv run ruff check src tests
       - name: Ruff format check
-        run: ruff format --check src tests
+        run: uv run ruff format --check src tests
       - name: Mypy
-        run: mypy src
+        run: uv run mypy src
       - name: Unit + integration tests
-        run: pytest -m "not live" --maxfail=1 -q
+        run: uv run pytest -m "not live" --maxfail=1 -q
 
   # Live sandbox contract tests run nightly, not on every PR (need vendor creds).
   live-contract:
