@@ -1,0 +1,50 @@
+%% Wanderbot — Supervisor agentic flow (src/wanderbot/agents/graph.py + routing.decide_next)
+%% A central supervisor deterministically routes to one specialist per hop;
+%% every specialist returns to the supervisor, which re-decides.
+flowchart TD
+    START([User message / resume]) --> SUP{{"SUPERVISOR<br/>routing.decide_next(state)"}}
+
+    %% ---- deterministic routing decisions out of the supervisor ----
+    SUP -->|brief is None| INTAKE["intake<br/><i>LLM: parse TripBrief</i>"]
+    SUP -->|no destination| RESPOND["respond<br/><i>ask for dest/dates</i>"]
+    SUP -->|missing origin or start_date| CLARIFY[["clarify ⏸ HITL"]]
+    SUP -->|research is None| RESEARCH["research<br/><i>RAG + web + images</i>"]
+    SUP -->|not flights_searched| FLIGHTS["flights<br/><i>search / ground transport</i>"]
+    SUP -->|flights found, not picked| SELECT[["select_flight ⏸ HITL"]]
+    SUP -->|lodging not done| LODGING["lodging"]
+    SUP -->|activities not done| ACTIVITIES["activities"]
+    SUP -->|budget == unknown| BUDGET["budget"]
+    SUP -->|budget == over| REPLAN["replan<br/><i>trim 1 activity</i>"]
+    SUP -->|itinerary is None| ITINERARY["itinerary<br/><i>LLM: author day-by-day</i>"]
+    SUP -->|images not done| CURATE["curate_images<br/><i>per-day photo</i>"]
+    SUP -->|leg not complete| FINALIZE["finalize_leg<br/><i>package + next leg</i>"]
+    SUP -->|all legs done, not approved| RESERVE[["reserve ⏸ HITL approval"]]
+    SUP -->|reserve approved| FIN([END])
+
+    %% ---- specialists loop back to the supervisor ----
+    INTAKE --> SUP
+    CLARIFY --> SUP
+    RESEARCH --> SUP
+    FLIGHTS --> SUP
+    SELECT --> SUP
+    LODGING --> SUP
+    ACTIVITIES --> SUP
+    BUDGET --> SUP
+    ITINERARY --> SUP
+    CURATE --> SUP
+
+    %% ---- loops ----
+    REPLAN -->|budget reset to unknown| SUP
+    BUDGET -. "over + iterations < max" .-> REPLAN
+    FINALIZE -. "more legs: reset per-leg state" .-> SUP
+
+    %% ---- terminal nodes (no return) ----
+    RESPOND --> FIN
+    RESERVE --> FIN
+
+    classDef hitl fill:#FAEEDA,stroke:#BA7517,color:#412402;
+    classDef llm fill:#E6F1FB,stroke:#185FA5,color:#042C53;
+    classDef term fill:#E1F5EE,stroke:#1D9E75,color:#04342C;
+    class CLARIFY,SELECT,RESERVE hitl;
+    class INTAKE,RESEARCH,FLIGHTS,LODGING,ACTIVITIES,BUDGET,REPLAN,ITINERARY,CURATE,FINALIZE,RESPOND llm;
+    class START,FIN,SUP term;
